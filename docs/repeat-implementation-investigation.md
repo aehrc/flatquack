@@ -264,16 +264,211 @@ CROSS JOIN UNNEST(result.r_1) AS f_1(r_1)
 
 **Verdict: Recommended approach.** Fits the existing architecture with minimal structural changes.
 
+### Solution F: Chained CTE with Baked-In Context (JSON)
+
+**Idea:** Instead of a global recursive CTE correlated back to the source via `_src_id` (Solution B), bake non-repeat columns and forEach context directly into the CTE's anchor member, then propagate them as scalars through the recursive member. The final SELECT reads directly from the CTE — no correlated subquery, no JOIN back to source.
+
+This approach is inspired by the SQL Server inline table-valued function pattern (see `sof-mssql/docs/repeat-limitations.md`), adapted for DuckDB which lacks inline TVFs.
+
+**Key insight:** The anchor member of the recursive CTE does the work that `_fq_source` + the correlated subquery currently do separately — it extracts resource-level columns, applies forEach unnesting, and enters the repeat traversal, all in one place. The recursive member only carries scalars and traverses deeper.
+
+**Verified working** in DuckDB. Example for `repeat: ["item", "answer.item"]`:
+
+```sql
+WITH RECURSIVE repeat_0 AS (
+    -- Anchor: extract non-repeat columns + unnest top-level items
+    SELECT
+        json_extract_string(r.resource, '$.id') AS resp_id,
+        json_extract_string(r.resource, '$.status') AS status,
+        unnest(coalesce(cast(r.resource->'item' AS JSON[]), []::JSON[])) AS node
+    FROM fhir_data r
+
+    UNION ALL
+
+    -- Recursive: carry scalar columns, combine all repeat paths in one member
+    SELECT resp_id, status,
+        unnest(
+            list_cat(
+                coalesce(cast(node->'item' AS JSON[]), []::JSON[]),
+                coalesce(flatten(list_transform(
+                    coalesce(cast(node->'answer' AS JSON[]), []::JSON[]),
+                    a -> coalesce(cast(a->'item' AS JSON[]), []::JSON[])
+                )), []::JSON[])
+            )
+        ) AS node
+    FROM repeat_0
+)
+SELECT
+    resp_id, status,
+    json_extract_string(node, '$.linkId') AS linkId
+FROM repeat_0
+```
+
+**DuckDB-specific constraints verified:**
+
+- `unnest` inside the recursive member: **works**.
+- `list_transform` with lambdas inside the recursive member: **works**.
+- Multiple `UNION ALL` branches each referencing the recursive CTE: **does not work** (same as Solution A). Multi-path repeat must combine all paths into a single recursive member via `list_cat`.
+
+**forEach inside repeat** works naturally — the forEach's unnest moves to the final SELECT (or a lateral join on the CTE output):
+
+```sql
+-- forEach "answer" inside repeat ["item"]
+SELECT
+    resp_id,
+    json_extract_string(node, '$.linkId') AS linkId,
+    json_extract_string(ans, '$.valueString') AS answer_value
+FROM repeat_0,
+     unnest(coalesce(cast(node->'answer' AS JSON[]), []::JSON[])) AS t(ans)
+```
+
+**repeat inside forEach** also works — the forEach becomes an unnest in the anchor, scoping the repeat to each forEach element:
+
+```sql
+WITH RECURSIVE repeat_0 AS (
+    -- Anchor: forEach baked in, repeat starts from forEach context
+    SELECT
+        json_extract_string(r.resource, '$.id') AS resp_id,
+        json_extract_string(forEach_0, '$.linkId') AS groupLinkId,
+        unnest(coalesce(cast(forEach_0->'item' AS JSON[]), []::JSON[])) AS node
+    FROM fhir_data r,
+         unnest(coalesce(cast(r.resource->'item' AS JSON[]), []::JSON[])) AS t(forEach_0)
+
+    UNION ALL
+
+    SELECT resp_id, groupLinkId,
+        unnest(coalesce(cast(node->'item' AS JSON[]), []::JSON[])) AS node
+    FROM repeat_0
+)
+SELECT resp_id, groupLinkId,
+    json_extract_string(node, '$.linkId') AS linkId
+FROM repeat_0
+```
+
+| Pros | Cons |
+|------|------|
+| No correlated subquery — final SELECT reads directly from the CTE | JSON traversal (same perf trade-off as Solution B) |
+| forEach inside repeat works naturally (unnest in final SELECT) | Column propagation cost — non-repeat columns carried through every recursion level (cheap for typical FHIR depths) |
+| repeat inside forEach works — forEach baked into anchor | Generator complexity — CTE builder must know about all non-repeat column expressions at construction time |
+| No DDL, no JOIN back to source | Significant departure from FlatQuack's two-phase compilation model |
+| Truly recursive — arbitrary depth | Single recursive member required (DuckDB constraint) — multi-path repeat needs `list_cat` |
+| Solves limitations 1, 2, and 4 of Solution B's current implementation | |
+
+**Verdict: Viable.** Addresses the main pain points of Solution B (correlated subquery, forEach/repeat nesting issues) while retaining arbitrary-depth recursion. The trade-off is increased generator complexity — the CTE construction must be aware of surrounding context (forEach, non-repeat columns), coupling concerns that are currently separate in FlatQuack's architecture.
+
+### Solution G: Inline `WITH RECURSIVE` Inside the Value Expression (JSON)
+
+**Idea:** Keep Solution B's JSON-based recursive traversal, but instead of hoisting the `WITH RECURSIVE` CTE to the top of the query, inline it *inside* the scalar subquery that produces the repeat column's list. Because it's an ordinary scalar subquery returning `list(struct)`, it composes anywhere a value expression composes — including inside `list_transform(el -> {...})` lambdas.
+
+**Verified working** in DuckDB. Both `UNNEST((WITH RECURSIVE r AS (...) SELECT list(n) FROM r))` and a `WITH RECURSIVE` block inside a struct field correlated to the outer row work as expected. The outer `WITH` does **not** need the `RECURSIVE` keyword — recursion is carried by the inner subquery.
+
+**Generated SQL structure** (top-level repeat — same shape as Solution B but with the CTE inlined):
+
+```sql
+WITH _fq_source AS (                        -- ← plain WITH; no template change
+    SELECT * FROM read_json_auto('...', columns={id: 'VARCHAR', item: 'JSON[]'})
+),
+transformed AS (
+    SELECT {
+        id: id,
+        e_1: coalesce((
+            WITH RECURSIVE r AS (
+                SELECT unnest(CAST(item AS JSON[])) AS node       -- ← seed correlates to outer row
+                UNION ALL
+                SELECT unnest(coalesce(CAST(node->'item' AS JSON[]), CAST([] AS JSON[])))
+                FROM r
+            )
+            SELECT list({
+                linkId: (json_transform(node, '{...}')).linkId,
+                text:   (json_transform(node, '{...}')).text
+            }) FROM r
+        ), [])
+    } AS result
+    FROM _fq_source
+)
+SELECT result.id, e_1.linkId, e_1.text
+FROM transformed
+CROSS JOIN UNNEST(result.e_1) AS f_1(e_1);  -- ← unchanged flattener
+```
+
+**Why nested cases work naturally:**
+
+The seed of the inline CTE evaluates in the surrounding scope — whether that's the source row or a `forEach` lambda iteration. There is no `_src_id` correlation key to propagate; each iteration's CTE simply seeds from whatever expression is in scope.
+
+- **`repeat` inside `forEach`** — the seed reads from the lambda variable directly:
+  ```sql
+  entry.list_transform(el -> {
+      e_2: coalesce((
+          WITH RECURSIVE r AS (
+              SELECT unnest(CAST((el.resource).item AS JSON[])) AS node    -- ← `el` in scope
+              UNION ALL
+              SELECT unnest(coalesce(CAST(node->'item' AS JSON[]), CAST([] AS JSON[]))) FROM r
+          )
+          SELECT list({linkId: (json_transform(node, '{...}')).linkId}) FROM r
+      ), [])
+  })
+  ```
+  No leakage of `el` into a top-level CTE — the CTE *is* in the lambda scope.
+
+- **`repeat` inside `repeat`** — the inner CTE seeds from the outer recursion's `node`:
+  ```sql
+  -- inner CTE seeds from the outer _ri (typed via json_transform)
+  SELECT list({...}) FROM (
+      WITH RECURSIVE r2 AS (
+          SELECT unnest(CAST(_ri.subItem AS JSON[])) AS node           -- ← outer _ri visible
+          UNION ALL
+          SELECT unnest(coalesce(CAST(node->'subItem' AS JSON[]), CAST([] AS JSON[]))) FROM r2
+      )
+      SELECT * FROM r2
+  )
+  ```
+
+**Required generator changes:**
+
+1. **`_repeat` in `ddb-sql-builder.js`:** emit a `(WITH RECURSIVE r AS (...) SELECT list(proj) FROM ...)` block instead of pushing the CTE to `_repeatCtes` and emitting a correlated `WHERE _src_id = id` subquery. The seed expression uses `__INPUT__` (already in flow — substituted by `flattenSql`) which now correctly resolves against the local scope (lambda var or outer column).
+2. **`flattenSql`:** drop the `_repeatCtes` substitution path — `__INPUT__` only needs to be patched on the inline expression itself.
+3. **`query-builder.js`:** drop `options._repeatCtes` accumulation and the `repeatCteSql` template variable.
+4. **Templates:** `{{fq_sql_repeat_cte}}` slot becomes unused; `{{fq_sql_with}}` always resolves to `WITH`. Could be removed in a cleanup pass, or left as no-ops for backwards compatibility.
+5. **Lambda variable handling:** the existing rename of `el → _ri` for column expressions inside the JSON-typed scope still applies (each repeat introduces its own `_ri`), but no longer crosses scopes — it's local to each `_repeat` emission.
+
+**Performance trade-offs vs. Solution B (hoisted CTE):**
+
+| Workload | Hoisted CTE (B) | Inline CTE (G) |
+|----------|-----------------|----------------|
+| 1000 resources, top-level repeat | One recursive walk over all rows + per-row filter | 1000 small recursive walks |
+| 1000 resources, repeat inside forEach with avg 5 entries | ❌ Broken | 5000 very small recursive walks |
+| Single resource (interactive query) | Fixed setup overhead | Lower setup, equivalent work |
+| Wide schemas (parquet full FHIR) | JSON cast amortized once | JSON cast per iteration |
+
+The hoisted form amortizes the recursive setup across all rows; the inline form trades that for compositionality. For the workloads where Solution B's `repeat-strategy=json` was specifically introduced (wide parquet schemas), the inline form may regress because each row pays its own JSON cast/setup cost — needs benchmarking.
+
+| Pros | Cons |
+|------|------|
+| **Solves limitations 1, 2, and 3 of Solution B** without architectural change to flattener | Per-row recursive CTE setup overhead |
+| Composes inside lambdas naturally — same scope rules as any value expression | Loses the "single shared walk" optimization for top-level repeats over large datasets |
+| **No template changes needed** — `{{fq_sql_with}}` and `{{fq_sql_repeat_cte}}` become redundant | Generator emits more verbose SQL (CTE definition repeats per call site) |
+| `__INPUT__` substitution stays simple — it's substituted only into the local expression | Performance vs. Solution B unverified for wide-schema workloads |
+| Supports arbitrary nesting (`repeat` inside `forEach` inside `repeat`, etc.) | DuckDB's optimizer must handle nested `WITH RECURSIVE` per row |
+| Outer `WITH` keyword unchanged — no `RECURSIVE` needed at top level | |
+| No correlation key to maintain (`_src_id` filter goes away) | |
+
+**Verdict: Viable, and the most compositional of the JSON-based options.** Recommended over Solution B if either (a) `repeat inside forEach` / `repeat inside repeat` are required, or (b) avoiding template surface area for the repeat feature is desirable. Should be benchmarked against Solution B on wide-schema parquet workloads before choosing as the default JSON strategy.
+
 ## Comparison Matrix
 
-| Criterion | A: Recursive CTE (typed) | B: Recursive CTE (JSON) | C: Chained CTEs | D: List ops (auto schema) | **E: List ops (explicit schema)** |
-|-----------|--------------------------|--------------------------|------------------|----------------------------|-------------------------------------|
-| Fits existing pattern | No | No | No | Yes | **Yes** |
-| Arbitrary depth | N/A | Yes | No | N/A | No (configurable limit) |
-| Typed struct performance | N/A | No (JSON) | Yes | N/A | **Yes** |
-| Template changes needed | N/A | Yes | Yes | No | **No** |
-| Knows depth at compile time | N/A | Not needed | Required | N/A | **Generated to fixed depth** |
-| Viable | **No** (binder error) | **Yes** | **Partially** | **No** (binder error) | **Yes** |
+| Criterion | A: Recursive CTE (typed) | B: Recursive CTE (JSON, hoisted) | C: Chained CTEs | D: List ops (auto schema) | **E: List ops (explicit schema)** | F: Chained CTE (baked context) | G: Recursive CTE (JSON, inline) |
+|-----------|--------------------------|----------------------------------|------------------|----------------------------|-------------------------------------|-------------------------------|---------------------------------|
+| Fits existing pattern | No | No | No | Yes | **Yes** | No | **Yes** |
+| Arbitrary depth | N/A | Yes | No | N/A | No (configurable limit) | Yes | Yes |
+| Typed struct performance | N/A | No (JSON) | Yes | N/A | **Yes** | No (JSON) | No (JSON) |
+| Template changes needed | N/A | Yes | Yes | No | **No** | Yes | **No** |
+| Knows depth at compile time | N/A | Not needed | Required | N/A | **Generated to fixed depth** | Not needed | Not needed |
+| Correlated subquery | N/A | Yes (perf cost) | No | N/A | No | **No** | No (CTE in scope) |
+| forEach inside repeat | N/A | Broken (lambda shadowing) | N/A | N/A | **Works** | **Works** (unnest in final SELECT) | **Works** (CTE in lambda scope) |
+| repeat inside forEach | N/A | Broken (CTE starts from root) | N/A | N/A | Not tested | **Works** (forEach baked into anchor) | **Works** (seed reads lambda var) |
+| repeat inside repeat | N/A | Broken (no chaining) | N/A | N/A | Broken (single-pass unroll) | Possible (chained anchors) | **Works** (inner CTE seeds from outer node) |
+| Per-row CTE setup cost | N/A | Amortized (one walk for all rows) | N/A | N/A | None | Amortized | Per row |
+| Viable | **No** (binder error) | **Yes** (with limitations) | **Partially** | **No** (binder error) | **Yes** | **Yes** | **Yes** |
 
 ## Open Questions
 
