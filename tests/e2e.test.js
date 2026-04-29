@@ -19,20 +19,17 @@ const resource = {
 	}]
 };
 
-beforeAll(done => {
-	db = openMemoryDb();
-	// Create temporary resource file
+beforeAll(async () => {
+	db = await openMemoryDb();
 	resourceFile = path.join(import.meta.dir, "e2e-test-resources.temp.json");
 	Bun.write(resourceFile, JSON.stringify([resource]));
-	done();
 });
 
-afterAll(done => {
-	// Clean up temporary file
+afterAll(async () => {
 	if (fs.existsSync(resourceFile)) {
 		fs.unlinkSync(resourceFile);
 	}
-	db.close(() => done());
+	await db.close();
 });
 
 describe("e2e tests", () => {

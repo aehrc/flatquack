@@ -10,13 +10,12 @@ import fhirSchema from "../schemas/fhir-schema-r4.json";
 
 let db;
 
-beforeAll( done => {
-	db = openMemoryDb();
-	done();
+beforeAll(async () => {
+	db = await openMemoryDb();
 });
 
-afterAll( done => {
-	db.close( () => done());
+afterAll(async () => {
+	await db.close();
 });
 
 
