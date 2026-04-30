@@ -12,7 +12,7 @@
 import fs from 'fs';
 import path from 'path';
 import { parseArgs } from 'util';
-import duckdb from 'duckdb';
+import { DuckDBInstance } from '@duckdb/node-api';
 import { templateToQuery } from '../src/query-builder.js';
 import fhirSchema from '../schemas/fhir-schema-r4.json';
 
@@ -77,18 +77,15 @@ function buildSql(template, filterByResourceType, inputDir) {
     ], false, filterByResourceType);
 }
 
-function runOne(sql) {
-    return new Promise((resolve, reject) => {
-        const db = new duckdb.Database(':memory:');
-        const start = performance.now();
-        db.all(sql, (err, res) => {
-            const elapsed = Math.round(performance.now() - start);
-            db.close(() => {
-                if (err) reject(err);
-                else resolve({ elapsed, rowCount: res.length });
-            });
-        });
-    });
+async function runOne(sql) {
+    const instance = await DuckDBInstance.create(':memory:');
+    const conn = await instance.connect();
+    const start = performance.now();
+    const result = await conn.runAndReadAll(sql);
+    const rows = result.getRowObjectsJS();
+    const elapsed = Math.round(performance.now() - start);
+    instance.closeSync();
+    return { elapsed, rowCount: rows.length };
 }
 
 async function runBenchmark(label, sql) {
