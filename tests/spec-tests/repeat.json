@@ -666,6 +666,370 @@
           "descendantLinkId": "g1.1.1"
         }
       ]
+    },
+    {
+      "title": "repeat inside forEachOrNull",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "Questionnaire",
+        "status": "active",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "id"
+              }
+            ]
+          },
+          {
+            "forEachOrNull": "item",
+            "select": [
+              {
+                "column": [
+                  {
+                    "name": "groupLinkId",
+                    "path": "linkId",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "repeat": ["item"],
+                "column": [
+                  {
+                    "name": "linkId",
+                    "path": "linkId",
+                    "type": "string"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "q1",
+          "groupLinkId": "g1",
+          "linkId": "g1.1"
+        },
+        {
+          "id": "q1",
+          "groupLinkId": "g1",
+          "linkId": "g1.1.1"
+        }
+      ]
+    },
+    {
+      "title": "sibling repeats at top level",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "Questionnaire",
+        "status": "active",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "id"
+              }
+            ]
+          },
+          {
+            "repeat": ["item"],
+            "column": [
+              {
+                "name": "linkIdA",
+                "path": "linkId",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "repeat": ["item"],
+            "column": [
+              {
+                "name": "linkIdB",
+                "path": "linkId",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {"id": "q1", "linkIdA": "g1", "linkIdB": "g1"},
+        {"id": "q1", "linkIdA": "g1", "linkIdB": "g1.1"},
+        {"id": "q1", "linkIdA": "g1", "linkIdB": "g1.1.1"},
+        {"id": "q1", "linkIdA": "g1", "linkIdB": "g2"},
+        {"id": "q1", "linkIdA": "g1.1", "linkIdB": "g1"},
+        {"id": "q1", "linkIdA": "g1.1", "linkIdB": "g1.1"},
+        {"id": "q1", "linkIdA": "g1.1", "linkIdB": "g1.1.1"},
+        {"id": "q1", "linkIdA": "g1.1", "linkIdB": "g2"},
+        {"id": "q1", "linkIdA": "g1.1.1", "linkIdB": "g1"},
+        {"id": "q1", "linkIdA": "g1.1.1", "linkIdB": "g1.1"},
+        {"id": "q1", "linkIdA": "g1.1.1", "linkIdB": "g1.1.1"},
+        {"id": "q1", "linkIdA": "g1.1.1", "linkIdB": "g2"},
+        {"id": "q1", "linkIdA": "g2", "linkIdB": "g1"},
+        {"id": "q1", "linkIdA": "g2", "linkIdB": "g1.1"},
+        {"id": "q1", "linkIdA": "g2", "linkIdB": "g1.1.1"},
+        {"id": "q1", "linkIdA": "g2", "linkIdB": "g2"}
+      ]
+    },
+    {
+      "title": "sibling repeats inside forEach",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "Questionnaire",
+        "status": "active",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "id"
+              }
+            ]
+          },
+          {
+            "forEach": "item",
+            "select": [
+              {
+                "column": [
+                  {
+                    "name": "groupLinkId",
+                    "path": "linkId",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "repeat": ["item"],
+                "column": [
+                  {
+                    "name": "linkIdA",
+                    "path": "linkId",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "repeat": ["item"],
+                "column": [
+                  {
+                    "name": "linkIdB",
+                    "path": "linkId",
+                    "type": "string"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {"id": "q1", "groupLinkId": "g1", "linkIdA": "g1.1", "linkIdB": "g1.1"},
+        {"id": "q1", "groupLinkId": "g1", "linkIdA": "g1.1", "linkIdB": "g1.1.1"},
+        {"id": "q1", "groupLinkId": "g1", "linkIdA": "g1.1.1", "linkIdB": "g1.1"},
+        {"id": "q1", "groupLinkId": "g1", "linkIdA": "g1.1.1", "linkIdB": "g1.1.1"}
+      ]
+    },
+    {
+      "title": "top-level repeat with sibling forEach containing repeat",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "Questionnaire",
+        "status": "active",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "id"
+              }
+            ]
+          },
+          {
+            "repeat": ["item"],
+            "column": [
+              {
+                "name": "topLinkId",
+                "path": "linkId",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "forEach": "item",
+            "select": [
+              {
+                "column": [
+                  {
+                    "name": "groupLinkId",
+                    "path": "linkId",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "repeat": ["item"],
+                "column": [
+                  {
+                    "name": "innerLinkId",
+                    "path": "linkId",
+                    "type": "string"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {"id": "q1", "topLinkId": "g1", "groupLinkId": "g1", "innerLinkId": "g1.1"},
+        {"id": "q1", "topLinkId": "g1", "groupLinkId": "g1", "innerLinkId": "g1.1.1"},
+        {"id": "q1", "topLinkId": "g1.1", "groupLinkId": "g1", "innerLinkId": "g1.1"},
+        {"id": "q1", "topLinkId": "g1.1", "groupLinkId": "g1", "innerLinkId": "g1.1.1"},
+        {"id": "q1", "topLinkId": "g1.1.1", "groupLinkId": "g1", "innerLinkId": "g1.1"},
+        {"id": "q1", "topLinkId": "g1.1.1", "groupLinkId": "g1", "innerLinkId": "g1.1.1"},
+        {"id": "q1", "topLinkId": "g2", "groupLinkId": "g1", "innerLinkId": "g1.1"},
+        {"id": "q1", "topLinkId": "g2", "groupLinkId": "g1", "innerLinkId": "g1.1.1"}
+      ]
+    },
+    {
+      "title": "forEach with repeat with forEach (triple nesting)",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "status": "active",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "id"
+              }
+            ]
+          },
+          {
+            "forEach": "item",
+            "select": [
+              {
+                "column": [
+                  {
+                    "name": "outerLinkId",
+                    "path": "linkId",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "repeat": ["item"],
+                "select": [
+                  {
+                    "column": [
+                      {
+                        "name": "midLinkId",
+                        "path": "linkId",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  {
+                    "forEach": "answer",
+                    "column": [
+                      {
+                        "name": "answerValue",
+                        "path": "value.ofType(string)",
+                        "type": "string"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "qr1",
+          "outerLinkId": "1",
+          "midLinkId": "1.1",
+          "answerValue": "Answer 1.1"
+        }
+      ]
+    },
+    {
+      "title": "repeat with forEach with repeat (triple nesting)",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "status": "active",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "id"
+              }
+            ]
+          },
+          {
+            "repeat": ["item"],
+            "select": [
+              {
+                "column": [
+                  {
+                    "name": "outerLinkId",
+                    "path": "linkId",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "forEach": "answer",
+                "select": [
+                  {
+                    "column": [
+                      {
+                        "name": "midValue",
+                        "path": "value.ofType(string)",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  {
+                    "repeat": ["item"],
+                    "column": [
+                      {
+                        "name": "innerLinkId",
+                        "path": "linkId",
+                        "type": "string"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "qr1",
+          "outerLinkId": "1.1",
+          "midValue": "Answer 1.1",
+          "innerLinkId": "1.1.1"
+        }
+      ]
     }
   ]
 }
