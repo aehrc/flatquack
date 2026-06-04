@@ -93,9 +93,13 @@ export function makeBuilder(schema, vars) {
 
 // --- main entry -----------------------------------------------------------
 
-export function buildStagedQuery(vd, schema, vars) {
+export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	assertNoRepeat(vd);
 	const B = makeBuilder(schema, vars);
+
+	const rootKeyMode = opts.rootKey || "natural";
+	if (rootKeyMode !== "natural" && rootKeyMode !== "uuid")
+		throw new Error(`unknown rootKey mode: ${rootKeyMode} (expected "natural" or "uuid")`);
 
 	const ctes = [];
 	let counter = 0;
@@ -103,6 +107,24 @@ export function buildStagedQuery(vd, schema, vars) {
 
 	const viewHasFork = subtreeHasFork(vd);
 	const rootKey = viewHasFork ? ["rid"] : [];
+
+	// The root `rid` is the recombination key for any root fork. In "natural" mode it is the
+	// resource key (`getResourceKey()` -> `id`), the semantically correct and deterministic
+	// identity (no blocking window). In "uuid" mode it is a synthesised per-resource `uuid()`
+	// that requires no id-uniqueness assumption, but whose volatility means `src` must be
+	// materialised so both fork branches observe the same value.
+	const rootKeyExpr = rootKeyMode === "uuid"
+		? "uuid()"
+		: B.compilePath("getResourceKey()", {ref: null, inLambda: false, seed: vd.resource, inputType: {}}).sql;
+	// Natural-key mode reads the resource key, which the ViewDefinition need not otherwise
+	// reference; expose its AST so the caller can add it to the typed read schema. Lazy: only
+	// when a fork actually needs the key (chain-only views and "uuid" mode add nothing).
+	const resourceKeyAst = (viewHasFork && rootKeyMode === "natural")
+		? fhirpathToAst("getResourceKey()", vd.resource, schema, vars)
+		: null;
+	// "uuid()" is volatile: the source scope must be materialised so it is evaluated exactly
+	// once per resource and both branches join on the same key.
+	const srcMaterialized = viewHasFork && rootKeyMode === "uuid";
 
 	// emitScope: builds a stage exposing keyCols + carried + this scope's columns, then
 	// chains or forks. `fromSql` is the FROM clause for this stage (null at root: the
@@ -118,7 +140,7 @@ export function buildStagedQuery(vd, schema, vars) {
 
 		// the root stage defines the resource key; deeper stages carry it forward
 		const keyProj = isRoot
-			? keyCols.map(k => k === "rid" ? "row_number() OVER () AS rid" : k)
+			? keyCols.map(k => k === "rid" ? `${rootKeyExpr} AS rid` : k)
 			: keyCols;
 		const stageSelect = [...keyProj, ...carried, ...colProjs.map(c => c.sql)];
 
@@ -257,5 +279,5 @@ export function buildStagedQuery(vd, schema, vars) {
 	const finalSelect = `SELECT ${order.join(", ")}\nFROM ${result.rel}`;
 	const tail = (ctes.length ? ",\n" + ctes.join(",\n") : "") + "\n" + finalSelect;
 
-	return {srcSelect: emitScope.srcSelect, tail};
+	return {srcSelect: emitScope.srcSelect, tail, srcMaterialized, resourceKeyAst};
 }

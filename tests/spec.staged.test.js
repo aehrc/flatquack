@@ -33,9 +33,12 @@ files.forEach( f => {
 if (testFiles.find(f => f.testGroup.only))
 	testFiles = testFiles.filter(f => f.testGroup.only);
 
-const buildStaged = (view, resourceFile) => templateToQuery(
+// Both root-fork key modes must produce identical results on every reference view.
+const ROOT_KEY_MODES = ["natural", "uuid"];
+
+const buildStaged = (view, resourceFile, rootKey="natural") => templateToQuery(
 	view, fhirSchema, stagedQueryTemplate,
-	[["test_file_path", resourceFile]], verbose, true, null, null, "staged"
+	[["test_file_path", resourceFile]], verbose, true, null, null, "staged", rootKey
 );
 
 describe("staged - unsupported directives", () => {
@@ -55,16 +58,17 @@ testFiles.forEach( testFile => {
 		const onlyTests = testGroup.tests.filter( t => t.only );
 		const tests = (onlyTests.length ? onlyTests : testGroup.tests);
 		tests.forEach( testCase => {
+			ROOT_KEY_MODES.forEach( rootKey => {
 
-			test( testCase.title, async () => {
+			test( `${testCase.title} [${rootKey}]`, async () => {
 				if (testCase.expectError) {
 					return expect( async () => {
-						const querySql = buildStaged(testCase.view, resourceFile);
+						const querySql = buildStaged(testCase.view, resourceFile, rootKey);
 						if (verbose) console.log(querySql);
 						await executeQuery(db, querySql);
 					}).toThrow();
 				}
-				const querySql = buildStaged(testCase.view, resourceFile);
+				const querySql = buildStaged(testCase.view, resourceFile, rootKey);
 				if (verbose) console.log(querySql)
 				const result = await executeQuery(db, querySql);
 				if (testCase.expect)
@@ -74,6 +78,7 @@ testFiles.forEach( testFile => {
 					expect(cols).toEqual(testCase.expectColumns);
 				}
 			});
+			})
 		})
 	})
 });

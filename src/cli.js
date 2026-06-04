@@ -28,6 +28,8 @@ Options:
   -s, --schema-file <path>      Custom schema file path (default: built-in FHIR R4 schema)
       --macros <path>           Custom macro file or directory (can be repeated)
       --var <name=value>        Values for FHIRPath constants in ViewDefinition (can be repeated)
+      --backend <name>          SQL emitter: struct|staged (default: struct)
+      --root-key <mode>         Staged root-fork recombination key: natural|uuid (default: natural)
       --param <name=value>      Template parameters (can be used repeated)
       --verbose                 Enable verbose output
       --help                    Show this help message
@@ -170,6 +172,8 @@ const args = parseArgs({
 		"macros": {type: "string", multiple: true},
 		"verbose": {type: "boolean"},
 		"mode": {type: "string", short: "m", default: "preview"},
+		"backend": {type: "string", default: "struct"},
+		"root-key": {type: "string", default: "natural"},
 		"param": {type: "string", multiple: true},
 		"var": {type: "string", multiple: true},
 		"help": {type: "boolean"},
@@ -218,7 +222,7 @@ for (const file of glob.scanSync(args.values["view-path"],{onlyFiles:true})) {
 	const outputPath = path.join(path.dirname(inputPath), basename + ".sql");
 
 	const view = JSON.parse(fs.readFileSync(inputPath));
-	const query = templateToQuery(view, schema, template, params, args.values["verbose"], undefined, customMacros, vars);
+	const query = templateToQuery(view, schema, template, params, args.values["verbose"], undefined, customMacros, vars, args.values["backend"], args.values["root-key"]);
 	const formattedQuery = formatSQL(query);
 
 	if (args.values["mode"] == "build") {

@@ -4,7 +4,7 @@ import {parseVd, extractPathsFromAst} from "./view-parser.js";
 import {buildStagedQuery} from "./staged-sql-builder.js";
 import macros from "../templates/duck-macros.js";
 
-export function buildQuery(vd, schema, filterByResourceType, verbose, vars, backend="struct") {
+export function buildQuery(vd, schema, filterByResourceType, verbose, vars, backend="struct", rootKey="natural") {
 	const parsedVd = parseVd(vd);
 	if (verbose) console.log(parsedVd.path)
 
@@ -23,21 +23,24 @@ export function buildQuery(vd, schema, filterByResourceType, verbose, vars, back
 		return `(${whereSql.sql})`;
 	}).join(" and ");
 
-	const schemaPaths = extractPathsFromAst({asts: [fpAst].concat(whereAsts)});
+	const staged = backend === "staged" ? buildStagedQuery(vd, schema, vars, {rootKey}) : null;
+	// The staged natural-key mode keys a fork on the resource key, which the ViewDefinition
+	// need not otherwise reference; include its path in the typed read schema so the key binds.
+	const keyAsts = staged && staged.resourceKeyAst ? [staged.resourceKeyAst] : [];
+	const schemaPaths = extractPathsFromAst({asts: [fpAst].concat(whereAsts).concat(keyAsts)});
 	const schemaSql = pathsToSchema(schemaPaths)
 	const outputSql = tablesToSql(parsedVd.tables);
-	const staged = backend === "staged" ? buildStagedQuery(vd, schema, vars) : null;
 	return {pathSql: fpSql, schemaSql, outputSql, whereSql, staged}
 }
 
 //TODO: consider replacing this with a full template language
-export function templateToQuery(vd, schema, template, args=[], verbose, filterByResourceType, customMacros=null, vars=null, backend="struct") {
+export function templateToQuery(vd, schema, template, args=[], verbose, filterByResourceType, customMacros=null, vars=null, backend="struct", rootKey="natural") {
 	//Setting filterByResourceType to btrue can only be used if the schema for the
 	//elements being use is compatible between all of the resources being read
 	//(e.g., element with the same names have the same structure). This is used
 	//in some of the tests that mix resource types.
 	
-	const queryParts = buildQuery(vd, schema, filterByResourceType, verbose, vars, backend);
+	const queryParts = buildQuery(vd, schema, filterByResourceType, verbose, vars, backend, rootKey);
 	const whereSql = queryParts.whereSql ? "WHERE " + queryParts.whereSql : "";
 	const schemaSql = queryParts.schemaSql ? `, columns=${queryParts.schemaSql}` : "";
 
@@ -56,7 +59,8 @@ export function templateToQuery(vd, schema, template, args=[], verbose, filterBy
 		["fq_vd_resource", vd.resource],
 		["fq_sql_macros", allMacros],
 		["fq_staged_src", queryParts.staged ? queryParts.staged.srcSelect : ""],
-		["fq_staged_tail", queryParts.staged ? queryParts.staged.tail : ""]
+		["fq_staged_tail", queryParts.staged ? queryParts.staged.tail : ""],
+		["fq_staged_src_materialized", queryParts.staged && queryParts.staged.srcMaterialized ? "MATERIALIZED " : ""]
 	]);
 
 	templateVars.forEach( v => {
