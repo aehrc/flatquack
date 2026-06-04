@@ -1,9 +1,10 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
 import {astToSql, pathsToSchema, tablesToSql} from "./ddb-sql-builder.js"
 import {parseVd, extractPathsFromAst} from "./view-parser.js";
+import {buildStagedQuery} from "./staged-sql-builder.js";
 import macros from "../templates/duck-macros.js";
 
-export function buildQuery(vd, schema, filterByResourceType, verbose, vars) {
+export function buildQuery(vd, schema, filterByResourceType, verbose, vars, backend="struct") {
 	const parsedVd = parseVd(vd);
 	if (verbose) console.log(parsedVd.path)
 
@@ -25,17 +26,18 @@ export function buildQuery(vd, schema, filterByResourceType, verbose, vars) {
 	const schemaPaths = extractPathsFromAst({asts: [fpAst].concat(whereAsts)});
 	const schemaSql = pathsToSchema(schemaPaths)
 	const outputSql = tablesToSql(parsedVd.tables);
-	return {pathSql: fpSql, schemaSql, outputSql, whereSql}
+	const staged = backend === "staged" ? buildStagedQuery(vd, schema, vars) : null;
+	return {pathSql: fpSql, schemaSql, outputSql, whereSql, staged}
 }
 
 //TODO: consider replacing this with a full template language
-export function templateToQuery(vd, schema, template, args=[], verbose, filterByResourceType, customMacros=null, vars=null) {
+export function templateToQuery(vd, schema, template, args=[], verbose, filterByResourceType, customMacros=null, vars=null, backend="struct") {
 	//Setting filterByResourceType to btrue can only be used if the schema for the
 	//elements being use is compatible between all of the resources being read
 	//(e.g., element with the same names have the same structure). This is used
 	//in some of the tests that mix resource types.
 	
-	const queryParts = buildQuery(vd, schema, filterByResourceType, verbose, vars);
+	const queryParts = buildQuery(vd, schema, filterByResourceType, verbose, vars, backend);
 	const whereSql = queryParts.whereSql ? "WHERE " + queryParts.whereSql : "";
 	const schemaSql = queryParts.schemaSql ? `, columns=${queryParts.schemaSql}` : "";
 
@@ -46,13 +48,15 @@ export function templateToQuery(vd, schema, template, args=[], verbose, filterBy
 		["fq_input_dir", process.cwd()],
 		["fq_output_dir", process.cwd()],
 		["fq_where_filter", whereSql],
-		["fq_sql_transform_expression", queryParts.pathSql],
+		["fq_sql_transform_expression", queryParts.pathSql + " AS result"],
 		["fq_sql_input_schema", schemaSql],
 		["fq_sql_flattening_cols", queryParts.outputSql.fieldSql],
 		["fq_sql_flattening_tables", queryParts.outputSql.joinSql],
 		["fq_vd_name", vd.name || "output"],
 		["fq_vd_resource", vd.resource],
-		["fq_sql_macros", allMacros]
+		["fq_sql_macros", allMacros],
+		["fq_staged_src", queryParts.staged ? queryParts.staged.srcSelect : ""],
+		["fq_staged_tail", queryParts.staged ? queryParts.staged.tail : ""]
 	]);
 
 	templateVars.forEach( v => {

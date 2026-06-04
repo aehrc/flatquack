@@ -17,7 +17,7 @@ export function tablesToSql(tables) {
 
 }
 
-export function astToSql(node, inLambda, inputType={}) {
+export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 
 	function flattenSql(querySegments) {
 		if (!querySegments) return;
@@ -43,7 +43,7 @@ export function astToSql(node, inLambda, inputType={}) {
 	if (Array.isArray(node)) {
 		let prevOutputType = inputType;
 		const outputSql = node.map(n => {
-			const query = astToSql(n, inLambda, prevOutputType);
+			const query = astToSql(n, inLambda, prevOutputType, rootVar);
 			//only treat first element of a navigation array as in lambda (prefixed with 'el')
 			if (inLambda) inLambda = false; 
 			if (query) prevOutputType = query.outputType;
@@ -61,7 +61,7 @@ export function astToSql(node, inLambda, inputType={}) {
 		case 'expr':
 		case 'paren':
 			const children = Array.isArray(node.children) ? node.children : [node.children];
-			const query = flattenSql( astToSql(children, inLambda, inputType) );
+			const query = flattenSql( astToSql(children, inLambda, inputType, rootVar) );
 			return {
 				sql: node.segmentType == "paren" ? `(${query.sql})` : query.sql, 
 				outputType: query.outputType
@@ -69,7 +69,7 @@ export function astToSql(node, inLambda, inputType={}) {
 
 		case 'nav':
 			if (inLambda) {
-				sql = `(el.${node.value})`
+				sql = `(${rootVar}.${node.value})`
 				outputType = {fhirType: node.type.fhirType, isArray: node.type.isArray, isNav: false}
 			} else if (inputType.fhirType && inputType.isArray) {
 				sql = `list_transform(el -> el.${node.value})${node.type.isArray ? ".flatten()" : ""}`;
@@ -87,7 +87,7 @@ export function astToSql(node, inLambda, inputType={}) {
 		//and, or, add, subtract, multiply
 		case 'components':
 			const components = node.args.map( c => {
-				return flattenSql( astToSql(c, inLambda) );
+				return flattenSql( astToSql(c, inLambda, {}, rootVar) );
 			});
 			sql = components.map(c => c.sql).join(` ${node.operator} `);
 			outputType = {fhirType: node.type.fhirType == "number" ? "number" : "boolean_expr", isArray: false}
@@ -95,9 +95,9 @@ export function astToSql(node, inLambda, inputType={}) {
 
 		//equality, inequality
 		case 'comparison':
-			let leftQuery = astToSql(node.args[0], inLambda, inputType);
+			let leftQuery = astToSql(node.args[0], inLambda, inputType, rootVar);
 			let leftIsArray = leftQuery.at(-1).outputType.isArray
-			let rightQuery = astToSql(node.args[1], inLambda, inputType);
+			let rightQuery = astToSql(node.args[1], inLambda, inputType, rootVar);
 			let rightIsArray = rightQuery.at(-1).outputType.isArray;
 			if (rightIsArray && !leftIsArray) {
 				[rightQuery, leftQuery] = [leftQuery, rightQuery];
@@ -115,7 +115,7 @@ export function astToSql(node, inLambda, inputType={}) {
 
 		case 'this':
 			return {
-				sql: inLambda ? "el" : "",
+				sql: inLambda ? rootVar : "",
 				outputType: inputType
 			}
 
@@ -135,13 +135,13 @@ export function astToSql(node, inLambda, inputType={}) {
 				
 				case 'where':
 					if (inputType && inputType.isArray) {
-						sql = `list_filter(el -> ${flattenSql(astToSql(firstArg, true)).sql})`;
+						sql = `list_filter(el -> ${flattenSql(astToSql(firstArg, true, {}, "el")).sql})`;
 						outputType = {fhirType: inputType.fhirType, isArray: true}
 					} else if (inputType.fhirType) {
-						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(firstArg, true)).sql}).slice(1)`;
+						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(firstArg, true, {}, "el")).sql}).slice(1)`;
 						outputType = {fhirType: inputType.fhirType, isArray: false}
 					} else {
-						sql = flattenSql(astToSql(firstArg)).sql;			
+						sql = flattenSql(astToSql(firstArg, undefined, {}, rootVar)).sql;
 						outputType = {fhirType: "boolean_expr", isArray: false}
 					}
 					return {sql, outputType}
@@ -188,7 +188,7 @@ export function astToSql(node, inLambda, inputType={}) {
 				case '_col_collection':
 					const colName = firstArg.value;
 					const colValue = node.args[1].at(-1);
-					let colValueSql = flattenSql(astToSql(node.args[1], inLambda, inputType));
+					let colValueSql = flattenSql(astToSql(node.args[1], inLambda, inputType, rootVar));
 					
 					// This validation can only really be run at runtime since a collection that happens
 					// to have one value is treated as a non-collection and doesn't need the collection tag. 
@@ -216,15 +216,15 @@ export function astToSql(node, inLambda, inputType={}) {
 						: ""
 			
 					if (!inputType.fhirType) {
-						const cols = node.args.map(a => astToSql(a, inLambda, inputType)).map(flattenSql).map(a => a.sql).join(",");
+						const cols = node.args.map(a => astToSql(a, inLambda, inputType, rootVar)).map(flattenSql).map(a => a.sql).join(",");
 						sql = `{${cols}}`;
 						outputType = {fhirType: inputType.fhirType, isArray: false};
 					} else if (inputType.fhirType && !inputType.isArray) {
-						const cols = node.args.map(a => astToSql(a, true, inputType)).map(flattenSql).map(a => a.sql).join(",");
+						const cols = node.args.map(a => astToSql(a, true, inputType, "el")).map(flattenSql).map(a => a.sql).join(",");
 						sql = `as_list().list_transform(el -> {${cols}})${orNullSql}`;
 						outputType = {fhirType: inputType.fhirType, isArray: true};
 					} else {
-						const cols = node.args.map(a => astToSql(a, true, inputType)).map(flattenSql).map(a => a.sql).join(",");
+						const cols = node.args.map(a => astToSql(a, true, inputType, "el")).map(flattenSql).map(a => a.sql).join(",");
 						sql = `${inLambda ? "el.as_list()." : ""}list_transform(el -> {${cols}})${orNullSql}`;
 						outputType = {fhirType: inputType.fhirType, isArray: true};
 					}
@@ -233,7 +233,7 @@ export function astToSql(node, inLambda, inputType={}) {
 				//non-standard
 				case '_unionAll':
 					const unions = node.args.map(a => {
-						const flat = flattenSql(astToSql(a, inLambda, inputType));
+						const flat = flattenSql(astToSql(a, inLambda, inputType, rootVar));
 						const arraySql = flat.outputType.isArray
 							? `coalesce(${flat.sql}, [])`
 							: `[${flat.sql}]`;
