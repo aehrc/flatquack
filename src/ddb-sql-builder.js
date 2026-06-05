@@ -23,6 +23,12 @@ export function tablesToSql(tables) {
 // otherwise resolve `el.field` inside the lambda against an outer column also named `el`.
 const L = "__el";
 
+// Reserved index variable paired with `L` for the indexed `list_transform` lambda that realizes a
+// `forEach`/`forEachOrNull`/`repeat` iteration. DuckDB's index parameter is 1-based, so `%rowIndex`
+// binds to `(__idx - 1)`. Nested iterations reuse the name; lexical shadowing keeps each level's
+// index correct, exactly as the reused `__el` element variable already relies on.
+const IDX = "__idx";
+
 // `repeat` lowering on the struct path needs the FHIR schema (to build the reduce seed and the
 // `from_json` bridge structure), which `astToSql` does not have. The orchestrator (query-builder)
 // computes a context exposing `sourceFor(id, elemSchemaPath, inputType, rootVar, inLambda)` —
@@ -31,7 +37,11 @@ const L = "__el";
 let repeatCtx = null;
 export function setRepeatContext(ctx) { repeatCtx = ctx; }
 
-export function astToSql(node, inLambda, inputType={}, rootVar="el") {
+// `rowIndexSql` carries the SQL for the current `%rowIndex` — the 0-based position within the
+// nearest enclosing iteration. It defaults to "0" (no enclosing iteration: resource root, or a
+// non-iterating projection branch). A real `_forEach`/`_forEachOrNull`/`_repeat` rebinds it to
+// `(<lambda index> - 1)` for its body; a `_project` wrapper passes it through unchanged.
+export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql="0") {
 
 	function flattenSql(querySegments) {
 		if (!querySegments) return;
@@ -57,7 +67,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 	if (Array.isArray(node)) {
 		let prevOutputType = inputType;
 		const outputSql = node.map(n => {
-			const query = astToSql(n, inLambda, prevOutputType, rootVar);
+			const query = astToSql(n, inLambda, prevOutputType, rootVar, rowIndexSql);
 			//only treat first element of a navigation array as in lambda (prefixed with 'el')
 			if (inLambda) inLambda = false; 
 			if (query) prevOutputType = query.outputType;
@@ -75,9 +85,9 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 		case 'expr':
 		case 'paren':
 			const children = Array.isArray(node.children) ? node.children : [node.children];
-			const query = flattenSql( astToSql(children, inLambda, inputType, rootVar) );
+			const query = flattenSql( astToSql(children, inLambda, inputType, rootVar, rowIndexSql) );
 			return {
-				sql: node.segmentType == "paren" ? `(${query.sql})` : query.sql, 
+				sql: node.segmentType == "paren" ? `(${query.sql})` : query.sql,
 				outputType: query.outputType
 			}; 
 
@@ -97,11 +107,16 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 		case 'literal':
 			sql = node.type.fhirType != "dateTime" ? node.value : `(TIMESTAMP '${node.value.replace("T", " ")}')`
 			return {sql, outputType: {fhirType: node.type.fhirType, isArray: false}};
-		
+
+		// `%rowIndex`: the 0-based position within the nearest enclosing iteration, threaded as
+		// `rowIndexSql` (bound to `(__idx - 1)` by an enclosing `_forEach`/`_repeat`, else "0").
+		case 'rowIndex':
+			return {sql: rowIndexSql, outputType: {fhirType: "integer", isArray: false}};
+
 		//and, or, add, subtract, multiply
 		case 'components':
 			const components = node.args.map( c => {
-				return flattenSql( astToSql(c, inLambda, {}, rootVar) );
+				return flattenSql( astToSql(c, inLambda, {}, rootVar, rowIndexSql) );
 			});
 			sql = components.map(c => c.sql).join(` ${node.operator} `);
 			outputType = {fhirType: node.type.fhirType == "number" ? "number" : "boolean_expr", isArray: false}
@@ -109,9 +124,9 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 
 		//equality, inequality
 		case 'comparison':
-			let leftQuery = astToSql(node.args[0], inLambda, inputType, rootVar);
+			let leftQuery = astToSql(node.args[0], inLambda, inputType, rootVar, rowIndexSql);
 			let leftIsArray = leftQuery.at(-1).outputType.isArray
-			let rightQuery = astToSql(node.args[1], inLambda, inputType, rootVar);
+			let rightQuery = astToSql(node.args[1], inLambda, inputType, rootVar, rowIndexSql);
 			let rightIsArray = rightQuery.at(-1).outputType.isArray;
 			if (rightIsArray && !leftIsArray) {
 				[rightQuery, leftQuery] = [leftQuery, rightQuery];
@@ -149,13 +164,13 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				
 				case 'where':
 					if (inputType && inputType.isArray) {
-						sql = `list_filter(${L} -> ${flattenSql(astToSql(firstArg, true, {}, L)).sql})`;
+						sql = `list_filter(${L} -> ${flattenSql(astToSql(firstArg, true, {}, L, rowIndexSql)).sql})`;
 						outputType = {fhirType: inputType.fhirType, isArray: true}
 					} else if (inputType.fhirType) {
-						sql = `as_list().list_filter(${L} -> ${flattenSql(astToSql(firstArg, true, {}, L)).sql}).slice(1)`;
+						sql = `as_list().list_filter(${L} -> ${flattenSql(astToSql(firstArg, true, {}, L, rowIndexSql)).sql}).slice(1)`;
 						outputType = {fhirType: inputType.fhirType, isArray: false}
 					} else {
-						sql = flattenSql(astToSql(firstArg, undefined, {}, rootVar)).sql;
+						sql = flattenSql(astToSql(firstArg, undefined, {}, rootVar, rowIndexSql)).sql;
 						outputType = {fhirType: "boolean_expr", isArray: false}
 					}
 					return {sql, outputType}
@@ -202,7 +217,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				case '_col_collection':
 					const colName = firstArg.value;
 					const colValue = node.args[1].at(-1);
-					let colValueSql = flattenSql(astToSql(node.args[1], inLambda, inputType, rootVar));
+					let colValueSql = flattenSql(astToSql(node.args[1], inLambda, inputType, rootVar, rowIndexSql));
 					
 					// This validation can only really be run at runtime since a collection that happens
 					// to have one value is treated as a non-collection and doesn't need the collection tag. 
@@ -225,21 +240,50 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				case '_forEachOrNull':
 
 					//TODO: error if each arg is not a col function
-					const orNullSql = node.name == "_forEachOrNull" 
-						? ".ifnull2([NULL])" 
-						: ""
-			
+					// A real iteration: the indexed `list_transform` lambda binds `%rowIndex` to
+					// `(__idx - 1)` for the body. `forEachOrNull` pads the SOURCE (`ifnull2([NULL])`
+					// BEFORE the transform) so the synthesized null row flows through the lambda and
+					// reports %rowIndex = 0, instead of being appended after it (design D4).
+					// Cast to INTEGER: DuckDB's `list_transform` index is BIGINT, but `%rowIndex` is an
+					// `integer` (and a BIGINT round-trips to a JS BigInt, breaking value equality).
+					const childRowIndex = `((${IDX} - 1)::INTEGER)`;
+					const nullPad = node.name == "_forEachOrNull" ? "ifnull2([NULL])." : "";
+
 					if (!inputType.fhirType) {
-						const cols = node.args.map(a => astToSql(a, inLambda, inputType, rootVar)).map(flattenSql).map(a => a.sql).join(",");
+						// No typed collection to iterate (unresolved field type): no list is produced,
+						// so there is no iteration index and `%rowIndex` stays 0.
+						const cols = node.args.map(a => astToSql(a, inLambda, inputType, rootVar, "0")).map(flattenSql).map(a => a.sql).join(",");
 						sql = `{${cols}}`;
 						outputType = {fhirType: inputType.fhirType, isArray: false};
-					} else if (inputType.fhirType && !inputType.isArray) {
-						const cols = node.args.map(a => astToSql(a, true, inputType, L)).map(flattenSql).map(a => a.sql).join(",");
-						sql = `as_list().list_transform(${L} -> {${cols}})${orNullSql}`;
+					} else {
+						const cols = node.args.map(a => astToSql(a, true, inputType, L, childRowIndex)).map(flattenSql).map(a => a.sql).join(",");
+						const pre = !inputType.isArray
+							? `as_list().${nullPad}`
+							: (inLambda ? `${rootVar}.as_list().${nullPad}` : nullPad);
+						sql = `${pre}list_transform((${L}, ${IDX}) -> {${cols}})`;
+						outputType = {fhirType: inputType.fhirType, isArray: true};
+					}
+					return {sql, outputType}
+
+				//non-standard
+				// A column projection at a scope (resource root, `select`, or a `unionAll` branch) —
+				// NOT an iteration. Same row shape as `_forEach`, but it does NOT open a new
+				// `%rowIndex` scope: the enclosing `rowIndexSql` is passed through unchanged (0 at the
+				// root; the enclosing forEach's index for a non-iterating union branch). The
+				// single-element `as_list().list_transform` wrapper here is structural, so its lambda
+				// position must never be mistaken for an iteration index.
+				case '_project':
+					if (!inputType.fhirType) {
+						const cols = node.args.map(a => astToSql(a, inLambda, inputType, rootVar, rowIndexSql)).map(flattenSql).map(a => a.sql).join(",");
+						sql = `{${cols}}`;
+						outputType = {fhirType: inputType.fhirType, isArray: false};
+					} else if (!inputType.isArray) {
+						const cols = node.args.map(a => astToSql(a, true, inputType, L, rowIndexSql)).map(flattenSql).map(a => a.sql).join(",");
+						sql = `as_list().list_transform(${L} -> {${cols}})`;
 						outputType = {fhirType: inputType.fhirType, isArray: true};
 					} else {
-						const cols = node.args.map(a => astToSql(a, true, inputType, L)).map(flattenSql).map(a => a.sql).join(",");
-						sql = `${inLambda ? rootVar + ".as_list()." : ""}list_transform(${L} -> {${cols}})${orNullSql}`;
+						const cols = node.args.map(a => astToSql(a, true, inputType, L, rowIndexSql)).map(flattenSql).map(a => a.sql).join(",");
+						sql = `${inLambda ? rootVar + ".as_list()." : ""}list_transform(${L} -> {${cols}})`;
 						outputType = {fhirType: inputType.fhirType, isArray: true};
 					}
 					return {sql, outputType}
@@ -264,7 +308,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 					// `list_transform(__el -> {<body cols>})` — projects the typed repeat elements
 					// once, after the reduce (the accumulator carries typed elements, not output rows).
 					const repeatSource = repeatCtx.sourceFor(repeatId, elemSchemaPath, inputType, rootVar, inLambda);
-					const repeatBody = flattenSql(astToSql([forEachFn], false, repeatElemType, L)).sql;
+					const repeatBody = flattenSql(astToSql([forEachFn], false, repeatElemType, L, rowIndexSql)).sql;
 					return {
 						sql: `${repeatSource}.${repeatBody}`,
 						outputType: {fhirType: elemTypeNode.fhirType, isArray: true, schemaPath: elemSchemaPath}
@@ -283,7 +327,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 					const jeSchemaPath = jeTypeNode.schemaPath;
 					const jeElemType = {fhirType: jeTypeNode.fhirType || "BackboneElement", isArray: true, schemaPath: jeSchemaPath};
 					const jeSource = repeatCtx.jsonEachSource(jeId, jeSchemaPath, inputType, rootVar, inLambda);
-					const jeBody = flattenSql(astToSql([jeFn], false, jeElemType, L)).sql;
+					const jeBody = flattenSql(astToSql([jeFn], false, jeElemType, L, rowIndexSql)).sql;
 					return {
 						sql: `${jeSource}.${jeBody}`,
 						outputType: {fhirType: jeTypeNode.fhirType, isArray: true, schemaPath: jeSchemaPath}
@@ -292,7 +336,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				//non-standard
 				case '_unionAll':
 					const unions = node.args.map(a => {
-						const flat = flattenSql(astToSql(a, inLambda, inputType, rootVar));
+						const flat = flattenSql(astToSql(a, inLambda, inputType, rootVar, rowIndexSql));
 						const arraySql = flat.outputType.isArray
 							? `coalesce(${flat.sql}, [])`
 							: `[${flat.sql}]`;
@@ -339,7 +383,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 					
 					// Process additional parameters (skip the first arg which is the macro name)
 					const macroParams = node.args.slice(1).map(argNodes => {
-						const argAst = flattenSql(astToSql(argNodes, false, inputType));
+						const argAst = flattenSql(astToSql(argNodes, false, inputType, rootVar, rowIndexSql));
 						return argAst.sql;
 					}).join(', ');
 					

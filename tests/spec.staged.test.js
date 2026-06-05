@@ -9,9 +9,10 @@ import fhirSchema from "../schemas/fhir-schema-r4.json";
 const verbose = process.env.VERBOSE === "1";
 const testDirectory = path.join(import.meta.dir, "./spec-tests/");
 
-// `%rowNumber` over `repeat` is a follow-up (design Non-Goals); everything else, including
+// `%rowIndex` is implemented on the struct backend only (change `add-rowindex-struct`); staged
+// parity is a follow-up, so the `row_index` suite is excluded here. Everything else, including
 // the official `repeat` suite, runs on the staged backend.
-const EXCLUDE = /^$/;
+const EXCLUDE = /^row_index/;
 
 let db;
 

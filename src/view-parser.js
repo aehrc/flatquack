@@ -157,14 +157,16 @@ export function parseVd(vd, skipValidation, structRepeat = false) {
 		if (node.column) {
 			node.column.forEach( c => addField(c.name, parentTable) );
 			const columns = node.column.map( c => `_col${c.collection ? "_collection" : ""}('${c.name}', ${c.path||c.name})` );
-			output.push(inUnion ? `_forEach(${columns})` : columns);
+			// `_project` (not `_forEach`): a column projection at a scope, NOT an iteration — it
+			// must not open a `%rowIndex` scope, so the emitter passes the enclosing index through.
+			output.push(inUnion ? `_project(${columns})` : columns);
 		}
 
 		if (node.select) {
 			const forced = scopeRepeatSeeds(node.select);
 			const path = node.select.map( n => parseNode(n, false, false, parentTable, forced) );
-			// output.push(isRoot ? `_forEach(${path.join(", ")})` : path);
-			output.push(isRoot || inUnion ? `_forEach(${path.join(", ")})` : path);
+			// The root/union `select` wrapper is a projection (`_project`), not an iteration.
+			output.push(isRoot || inUnion ? `_project(${path.join(", ")})` : path);
 		}
 		
 		if (node.unionAll) {
@@ -174,7 +176,7 @@ export function parseVd(vd, skipValidation, structRepeat = false) {
 			const unionPath = inUnion
 				? `_unionAll(${path.join(", ")})`
 				: `_col_collection('${unionTable}', _unionAll(${path.join(", ")}))`;
-			output.push(isRoot ? `_forEach(${unionPath})` : unionPath);
+			output.push(isRoot ? `_project(${unionPath})` : unionPath);
 		}
 
 		return output.join(", ");

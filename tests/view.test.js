@@ -10,10 +10,10 @@ describe("parse view definitions into superpath", () => {
 			}]
 		}
 		const result = parseVd(view, true).path;
-		const fp = `_forEach(
-			_col_collection('u_1', 
+		const fp = `_project(
+			_col_collection('u_1',
 				_unionAll(
-					_forEach(
+					_project(
 						_col('id', id)
 					)
 				)
@@ -33,10 +33,10 @@ describe("parse view definitions into superpath", () => {
 			}]
 		}
 		const result = parseVd(view, true).path;
-		const fp = `_forEach(
-			_col_collection('u_1', 
+		const fp = `_project(
+			_col_collection('u_1',
 				_unionAll(
-					_forEach(
+					_project(
 						_col('id', id),
 						_col('valueString', valueString)
 					)
@@ -57,11 +57,11 @@ describe("parse view definitions into superpath", () => {
 			}]
 		}
 		const result = parseVd(view, true).path;
-		const fp = `_forEach(
+		const fp = `_project(
 			_col('id', id),
-			_col_collection('u_1', 
+			_col_collection('u_1',
 				_unionAll(
-					_forEach(
+					_project(
 						_col('valueString', valueString)
 					)
 				)
