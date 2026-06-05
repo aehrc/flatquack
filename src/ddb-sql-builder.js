@@ -7,7 +7,7 @@ export function tablesToSql(tables) {
 	const joinSql = tables.map( (t,i) => {
 		if (t.type == "nullEach" || t.allowNull) {
 			return `LEFT JOIN UNNEST(${t.parent||"result"}.${t.name}) AS l_${i}(${t.name}) ON TRUE`;
-		} else if (t.type == "each" || (t.type == "union" && !t.allowNull)) {
+		} else if (t.type == "each" || t.type == "repeat" || (t.type == "union" && !t.allowNull)) {
 			return `CROSS JOIN UNNEST(${t.parent||"result"}.${t.name}) AS f_${i}(${t.name})`;
 		}
 		
@@ -22,6 +22,14 @@ export function tablesToSql(tables) {
 // so a lambda parameter can never collide with the element it is applied to — DuckDB would
 // otherwise resolve `el.field` inside the lambda against an outer column also named `el`.
 const L = "__el";
+
+// `repeat` lowering on the struct path needs the FHIR schema (to build the reduce seed and the
+// `from_json` bridge structure), which `astToSql` does not have. The orchestrator (query-builder)
+// computes a context exposing `sourceFor(id, elemSchemaPath, inputType, rootVar, inLambda)` —
+// returning the reduce-accumulator + typed-bridge SQL for a `_repeat` directive — and installs it
+// here for the duration of one compile (design D4). `null` means there are no repeats to lower.
+let repeatCtx = null;
+export function setRepeatContext(ctx) { repeatCtx = ctx; }
 
 export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 
@@ -76,13 +84,13 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 		case 'nav':
 			if (inLambda) {
 				sql = `(${rootVar}.${node.value})`
-				outputType = {fhirType: node.type.fhirType, isArray: node.type.isArray, isNav: false}
+				outputType = {fhirType: node.type.fhirType, isArray: node.type.isArray, isNav: false, schemaPath: node.type.schemaPath}
 			} else if (inputType.fhirType && inputType.isArray) {
 				sql = `list_transform(${L} -> ${L}.${node.value})${node.type.isArray ? ".flatten()" : ""}`;
-				outputType = {fhirType: node.type.fhirType, isArray: true, isNav: false}
+				outputType = {fhirType: node.type.fhirType, isArray: true, isNav: false, schemaPath: node.type.schemaPath}
 			} else {
 				sql = node.value;
-				outputType = {fhirType: node.type.fhirType, isArray: node.type.isArray, isNav: true};
+				outputType = {fhirType: node.type.fhirType, isArray: node.type.isArray, isNav: true, schemaPath: node.type.schemaPath};
 			}
 			return {sql, outputType}
 
@@ -235,6 +243,51 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 						outputType = {fhirType: inputType.fhirType, isArray: true};
 					}
 					return {sql, outputType}
+
+				//non-standard
+				case '_repeat':
+					// `_repeat('id', <firstPath>._forEach(<body>))`: a `repeat` lowered as a forEach
+					// whose source list is a bounded `list_reduce` accumulator over a JSON node,
+					// bridged to typed elements via an inline `from_json` (design D1). The body is the
+					// existing `_forEach` machinery, re-rooted (by fhirpathToAst) at the repeat element
+					// type. The schema-dependent reduce+bridge wrapper comes from `repeatCtx`.
+					if (!repeatCtx) throw new Error("repeat encountered without a repeat context");
+					const repeatId = firstArg.value.replace(/^['"]|['"]$/g, "");
+					const repeatArg = node.args[1];                       // [..nav.., _forEach fn]
+					const forEachFn = repeatArg.at(-1);
+					const elemTypeNode = repeatArg[repeatArg.length - 2].type;  // last seed nav's type
+					const elemSchemaPath = elemTypeNode.schemaPath;
+					// An unresolved seed type (e.g. a path absent from the resource) still needs the
+					// list_transform body branch, not the no-type bare-struct branch; the seed is empty
+					// so the body never runs, but the SQL must stay a valid list expression.
+					const repeatElemType = {fhirType: elemTypeNode.fhirType || "BackboneElement", isArray: true, schemaPath: elemSchemaPath};
+					// `list_transform(__el -> {<body cols>})` — projects the typed repeat elements
+					// once, after the reduce (the accumulator carries typed elements, not output rows).
+					const repeatSource = repeatCtx.sourceFor(repeatId, elemSchemaPath, inputType, rootVar, inLambda);
+					const repeatBody = flattenSql(astToSql([forEachFn], false, repeatElemType, L)).sql;
+					return {
+						sql: `${repeatSource}.${repeatBody}`,
+						outputType: {fhirType: elemTypeNode.fhirType, isArray: true, schemaPath: elemSchemaPath}
+					};
+
+				//non-standard
+				case '_jsoneach':
+					// A `forEach` over a field a sibling `repeat` forces to JSON[] (shared-field case,
+					// design D3): one descent level (no reduce), the navigated JSON list bridged to
+					// typed elements via `from_json`, then the existing forEach body machinery.
+					if (!repeatCtx) throw new Error("jsoneach encountered without a repeat context");
+					const jeId = firstArg.value.replace(/^['"]|['"]$/g, "");
+					const jeArg = node.args[1];                           // [..nav.., _forEach fn]
+					const jeFn = jeArg.at(-1);
+					const jeTypeNode = jeArg[jeArg.length - 2].type;
+					const jeSchemaPath = jeTypeNode.schemaPath;
+					const jeElemType = {fhirType: jeTypeNode.fhirType || "BackboneElement", isArray: true, schemaPath: jeSchemaPath};
+					const jeSource = repeatCtx.jsonEachSource(jeId, jeSchemaPath, inputType, rootVar, inLambda);
+					const jeBody = flattenSql(astToSql([jeFn], false, jeElemType, L)).sql;
+					return {
+						sql: `${jeSource}.${jeBody}`,
+						outputType: {fhirType: jeTypeNode.fhirType, isArray: true, schemaPath: jeSchemaPath}
+					};
 
 				//non-standard
 				case '_unionAll':

@@ -1,6 +1,6 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
-import {astToSql, pathsToJsonStruct} from "./ddb-sql-builder.js";
-import {parseVd, extractPathsFromAst} from "./view-parser.js";
+import {astToSql} from "./ddb-sql-builder.js";
+import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf} from "./repeat-lowering.js";
 
 // Staged-CTE emitter (SPEC_hybrid). Walks the ViewDefinition tree, classifies each
 // scope CHAIN (<=1 fan-out) or FORK (>=2), and emits staged CTEs. Leaves are compiled
@@ -21,13 +21,6 @@ function hasRepeat(node) {
 	if (!node || typeof node !== "object") return false;
 	if (node.repeat) return true;
 	return (node.select || []).some(hasRepeat) || (node.unionAll || []).some(hasRepeat);
-}
-
-// A listed `repeat` path must be a simple dot-separated traversal of element names; anything
-// using a function/filter/indexer (where()/ofType()/first()/[n]) is rejected (design Non-goal).
-function assertSimplePath(p) {
-	if (typeof p !== "string" || !/^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*$/.test(p))
-		throw new Error(`repeat supports simple traversal paths only; got '${p}'`);
 }
 
 // Collect a scope's direct columns and fan-out children. A nested `select` with no
@@ -86,17 +79,6 @@ export function makeBuilder(schema, vars) {
 		return {name: col.name, expr, sql: `${expr} AS ${col.name}`};
 	}
 
-	// The element produced by iterating `pathStr` from `elem`.
-	function childElemOf(pathStr, elem) {
-		const {type} = compilePath(pathStr, elem);
-		return {
-			ref: "node",
-			inLambda: true,
-			seed: type.schemaPath,
-			inputType: {fhirType: type.fhirType, isArray: false, schemaPath: type.schemaPath}
-		};
-	}
-
 	// Wrap a non-list path as a 1-element list so it can be UNNESTed. Use the SQL-level
 	// array-ness (outputType), not the FHIR cardinality of the final step: navigation
 	// through an array flattens to a list (e.g. `contact.name`), and an indexer like
@@ -106,22 +88,10 @@ export function makeBuilder(schema, vars) {
 		return outputType.isArray ? sql : `as_list(${sql})`;
 	}
 
-	// The `from_json` structure for a repeat scope: pathsToSchema (in `from_json` JSON form)
-	// over the scope's column/forEach/where paths, rooted at the scope element, truncated at
-	// nested repeat seeds (design D5). Reuses parseVd's path walk (which surfaces a nested
-	// repeat's seed childless -> raw JSON[]) rooted at the element's schemaPath.
-	function repeatStructure(repeatNode, elemSchemaPath) {
-		// Wrap the body (sans `repeat`) as a nested select so a column-only body is walked as a
-		// scope (parseVd only emits a root projection wrapper for `select`, not bare `column`).
-		const body = {column: repeatNode.column, select: repeatNode.select, unionAll: repeatNode.unionAll};
-		const pseudoVd = {resource: elemSchemaPath, select: [body]};
-		const {path} = parseVd(pseudoVd, true);
-		if (!path) return "{}";
-		const ast = fhirpathToAst(path, elemSchemaPath, schema, vars);
-		return pathsToJsonStruct(extractPathsFromAst({asts: [ast]}));
-	}
-
-	return {compilePath, compileColumn, childElemOf, arrayize, repeatStructure};
+	const builder = {compilePath, compileColumn, arrayize};
+	builder.childElemOf = (pathStr, elem) => childElemOf(pathStr, elem, builder);
+	builder.repeatStructure = (repeatNode, elemSchemaPath) => repeatStructure(repeatNode, elemSchemaPath, schema, vars);
+	return builder;
 }
 
 // --- main entry -----------------------------------------------------------
@@ -179,34 +149,6 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	// once per resource and both branches join on the same key.
 	const srcMaterialized = viewHasFork && rootKeyMode === "uuid";
 
-	// The seed array off the enclosing element for a repeat's listed paths: each path is the
-	// typed navigation of that path (a repeat seed reads as JSON[]); paths that do not resolve
-	// off this element (e.g. `answer.item` off the resource focus) contribute nothing.
-	function typedSeed(paths, elem) {
-		const parts = [];
-		paths.forEach(p => {
-			let resolved;
-			try { resolved = B.compilePath(p, elem); } catch { return; }
-			if (resolved.type && resolved.type.fhirType) parts.push(B.arrayize(p, elem));
-		});
-		if (!parts.length) return "[]::JSON[]";
-		return parts.length === 1 ? parts[0] : `list_concat(${parts.join(", ")})`;
-	}
-
-	// The JSON descent fold for the recursive leg: re-apply each listed path to a visited JSON
-	// node (single step `fhir_list(node -> '$.p')`; multi-step `a.b` flattens through `a`;
-	// multiple paths concatenate), design D1.
-	function jsonFold(paths, nodeExpr) {
-		const folds = paths.map(p => {
-			const steps = p.split(".");
-			let expr = `fhir_list(${nodeExpr} -> '$.${steps[0]}')`;
-			for (let i = 1; i < steps.length; i++)
-				expr = `list_transform(${expr}, x -> fhir_list(x -> '$.${steps[i]}')).flatten()`;
-			return expr;
-		});
-		return folds.length === 1 ? folds[0] : `list_concat(${folds.join(", ")})`;
-	}
-
 	// Prepare a repeat fan-out: validate its paths, resolve the descent element type, and
 	// materialise the seed array into the owning stage's projection.
 	function prepRepeat(f, elem, schemaPrefix, stageSelect) {
@@ -214,7 +156,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		f.listedPaths.forEach(assertSimplePath);
 		f.childElem = B.childElemOf(f.listedPaths[0], elem);
 		f.seedCol = name("a") + "_seed";
-		stageSelect.push(`${typedSeed(f.listedPaths, elem)} AS ${f.seedCol}`);
+		stageSelect.push(`${typedSeed(f.listedPaths, elem, B)} AS ${f.seedCol}`);
 		// A seed field read in a typed scope must be JSON[] even if a sibling forEach types it.
 		if (schemaPrefix) f.listedPaths.forEach(p =>
 			forcedJsonPaths.push([...schemaPrefix, ...p.split(".")].join(".")));
