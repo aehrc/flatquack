@@ -18,7 +18,7 @@ export const testQueryTemplate = `
 // Staged backend (SPEC_hybrid): the first CTE reuses the existing source mechanism;
 // the builder emits the rest of the query into {{fq_staged_tail}}.
 export const stagedQueryTemplate = `
-	WITH src AS {{fq_staged_src_materialized}}(
+	{{fq_staged_macros}}{{fq_staged_with}} src AS {{fq_staged_src_materialized}}(
 		SELECT {{fq_staged_src}}
 		FROM read_json_auto(
 			'{{test_file_path}}'

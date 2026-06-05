@@ -7,7 +7,7 @@ import fhirSchema from "../schemas/fhir-schema-r4.json";
 import macros from "../templates/duck-macros.js";
 import {format} from "sql-formatter";
 
-const STAGED_TEMPLATE = `WITH src AS {{fq_staged_src_materialized}}(
+const STAGED_TEMPLATE = `{{fq_staged_macros}}{{fq_staged_with}} src AS {{fq_staged_src_materialized}}(
   SELECT {{fq_staged_src}}
   FROM read_json_auto(
     '{{SOURCE}}'

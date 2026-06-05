@@ -88,6 +88,14 @@ export function parseVd(vd, skipValidation) {
 	}
 
 	function parseNode(node, isRoot, inUnion, parentTable) {
+		// A `repeat` directive descends its listed paths recursively; the staged backend
+		// evaluates the body on JSON (via from_json), so for the typed read schema we only
+		// surface the seed fields — each lands childless, hence as raw JSON[] (a recursive
+		// FHIR type is not a finite STRUCT). The body is not walked here.
+		if (node.repeat && !isRoot) {
+			return node.repeat.map(p => `_col('_rseed', ${p})`).join(", ");
+		}
+
 		if (node.forEach || node.forEachOrNull) {
 			const eachTable = !inUnion ? addTable(node.forEach ? "each" : "nullEach", parentTable, !!node.forEachOrNull) : parentTable;
 			if (inUnion && node.forEachOrNull) updateTable(eachTable, true);

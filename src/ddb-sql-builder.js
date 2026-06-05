@@ -304,14 +304,28 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 	}
 }
 
+// Map a leaf path node to its DuckDB scalar SQL type (no array indicator).
+function leafSqlType(node) {
+	if (node.fhirType == "decimal") return "DOUBLE";
+	if (["boolean", "integer"].indexOf(node.fhirType) > -1) return node.fhirType.toUpperCase();
+	if (node.fhirType && node.fhirType[0] != node.fhirType[0].toUpperCase()) return "VARCHAR";
+	return "JSON";
+}
+
 export function pathsToSchema(node, isInRoot=true) {
 	if (Array.isArray(node)) {
 		const schema = node.map(n => pathsToSchema(n, isInRoot)).join(", ");
-		return (isInRoot) ? `{ ${schema} }` : schema; 
+		return (isInRoot) ? `{ ${schema} }` : schema;
 	}
 
 	const arrayIndicator = node.isArray ? "[]" : "";
 	let sqlType;
+	// A repeat seed is read as a raw JSON list (a recursive FHIR type is not a finite STRUCT);
+	// it forces JSON regardless of any sibling navigation that would otherwise type it.
+	if (node.forceJson) {
+		sqlType = `JSON${arrayIndicator}`;
+		return isInRoot ? `${node.value}: '${sqlType}'` : `${node.value} ${sqlType}`;
+	}
 	if (!node.fhirType) console.log(`${JSON.stringify(node)} is of an unknown type`)
 	if (node.children.length) {
 		sqlType = `STRUCT(${node.children.map(c => pathsToSchema(c, false)).join(", ")})${arrayIndicator}`
@@ -325,4 +339,27 @@ export function pathsToSchema(node, isInRoot=true) {
 		sqlType = `JSON${arrayIndicator}`;
 	}
 	return isInRoot ? `${node.value}: '${sqlType}'` : `${node.value} ${sqlType}`
+};
+
+// Render a path tree as a `from_json` structure (the JSON-object form `from_json` accepts:
+// objects are `{"f":T,...}`, arrays of objects are `[{...}]`, scalar/JSON leaves are quoted
+// type strings like `"VARCHAR"`, `"VARCHAR[]"`, `"JSON[]"`). Truncated/childless complex
+// nodes (notably nested-repeat seeds) become `"JSON[]"`, matching the truncate-at-repeat-seed
+// schema rule and keeping those subtrees raw so they can re-enter `WITH RECURSIVE`.
+export function pathsToJsonStruct(node, isInRoot=true) {
+	if (Array.isArray(node)) {
+		const fields = node.map(n => `${JSON.stringify(n.value)}:${pathsToJsonStruct(n, false)}`).join(",");
+		return `{${fields}}`;
+	}
+
+	const arr = node.isArray;
+	let typeStr;
+	if (!node.forceJson && node.children && node.children.length) {
+		const inner = `{${node.children.map(c => `${JSON.stringify(c.value)}:${pathsToJsonStruct(c, false)}`).join(",")}}`;
+		typeStr = arr ? `[${inner}]` : inner;
+	} else {
+		const scalar = node.forceJson ? "JSON" : leafSqlType(node);
+		typeStr = JSON.stringify(`${scalar}${arr ? "[]" : ""}`);
+	}
+	return isInRoot ? `{${JSON.stringify(node.value)}:${typeStr}}` : typeStr;
 };

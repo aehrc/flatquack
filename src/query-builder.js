@@ -4,12 +4,31 @@ import {parseVd, extractPathsFromAst} from "./view-parser.js";
 import {buildStagedQuery} from "./staged-sql-builder.js";
 import macros from "../templates/duck-macros.js";
 
+// Force the schema tree nodes named by resource-rooted dot paths to read as raw JSON[]
+// (a repeat seed: "repeat wins" over any sibling navigation that would type the field).
+function applyForcedJson(tree, paths) {
+	(paths || []).forEach(pathStr => {
+		let level = tree, node = null;
+		for (const seg of pathStr.split(".")) {
+			node = level.find(n => n.value === seg);
+			if (!node) break;
+			level = node.children;
+		}
+		if (node) { node.forceJson = true; node.children = []; }
+	});
+}
+
 export function buildQuery(vd, schema, filterByResourceType, verbose, vars, backend="struct", rootKey="natural") {
 	const parsedVd = parseVd(vd);
 	if (verbose) console.log(parsedVd.path)
 
+	const staged = backend === "staged" ? buildStagedQuery(vd, schema, vars, {rootKey}) : null;
+
+	// The parseVd transform/flattening is only consumed by the struct backend. For a staged
+	// `repeat` view it is not emitted (the staged backend lowers repeat itself), and compiling
+	// it can fail, so it is computed lazily only when needed.
 	const fpAst = fhirpathToAst(parsedVd.path, vd.resource, schema, vars);
-	const fpSql = astToSql(fpAst).sql;
+	const fpSql = (staged && staged.hasRepeat) ? "" : astToSql(fpAst).sql;
 
 	const whereAsts = (vd.where||[]).map(w => w.path)
 		.concat([filterByResourceType ? `resourceType = '${vd.resource}'` : null])
@@ -23,11 +42,11 @@ export function buildQuery(vd, schema, filterByResourceType, verbose, vars, back
 		return `(${whereSql.sql})`;
 	}).join(" and ");
 
-	const staged = backend === "staged" ? buildStagedQuery(vd, schema, vars, {rootKey}) : null;
 	// The staged natural-key mode keys a fork on the resource key, which the ViewDefinition
 	// need not otherwise reference; include its path in the typed read schema so the key binds.
 	const keyAsts = staged && staged.resourceKeyAst ? [staged.resourceKeyAst] : [];
 	const schemaPaths = extractPathsFromAst({asts: [fpAst].concat(whereAsts).concat(keyAsts)});
+	if (staged && staged.hasRepeat) applyForcedJson(schemaPaths, staged.forcedJsonPaths);
 	const schemaSql = pathsToSchema(schemaPaths)
 	const outputSql = tablesToSql(parsedVd.tables);
 	return {pathSql: fpSql, schemaSql, outputSql, whereSql, staged}
@@ -60,6 +79,8 @@ export function templateToQuery(vd, schema, template, args=[], verbose, filterBy
 		["fq_sql_macros", allMacros],
 		["fq_staged_src", queryParts.staged ? queryParts.staged.srcSelect : ""],
 		["fq_staged_tail", queryParts.staged ? queryParts.staged.tail : ""],
+		["fq_staged_with", queryParts.staged ? queryParts.staged.withKeyword : "WITH"],
+		["fq_staged_macros", queryParts.staged ? queryParts.staged.macros : ""],
 		["fq_staged_src_materialized", queryParts.staged && queryParts.staged.srcMaterialized ? "MATERIALIZED " : ""]
 	]);
 

@@ -1,7 +1,6 @@
 import fs from "fs";
 import path from "path";
 import {expect, test, describe, beforeAll, afterAll} from "bun:test"
-import {buildStagedQuery} from "../src/staged-sql-builder.js";
 
 import {templateToQuery} from "../src/query-builder.js";
 import {stagedQueryTemplate, openMemoryDb, getColumns, executeQuery} from "./test-util.js";
@@ -10,9 +9,9 @@ import fhirSchema from "../schemas/fhir-schema-r4.json";
 const verbose = process.env.VERBOSE === "1";
 const testDirectory = path.join(import.meta.dir, "./spec-tests/");
 
-// The staged backend does not implement `repeat` or `%rowNumber` (design Non-Goals).
-// Exclude those suites; everything else is the official reference harness, unchanged.
-const EXCLUDE = /^repeat\./;
+// `%rowNumber` over `repeat` is a follow-up (design Non-Goals); everything else, including
+// the official `repeat` suite, runs on the staged backend.
+const EXCLUDE = /^$/;
 
 let db;
 
@@ -40,15 +39,6 @@ const buildStaged = (view, resourceFile, rootKey="natural") => templateToQuery(
 	view, fhirSchema, stagedQueryTemplate,
 	[["test_file_path", resourceFile]], verbose, true, null, null, "staged", rootKey
 );
-
-describe("staged - unsupported directives", () => {
-	test("repeat is rejected with a clear error", () => {
-		const view = {resource: "QuestionnaireResponse", select: [
-			{forEach: "item", repeat: ["item"], column: [{name: "l", path: "linkId", type: "string"}]}
-		]};
-		expect(() => buildStagedQuery(view, fhirSchema, {})).toThrow(/repeat/);
-	});
-});
 
 testFiles.forEach( testFile => {
 	const {fileName, testGroup} = testFile;
