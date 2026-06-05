@@ -17,6 +17,12 @@ export function tablesToSql(tables) {
 
 }
 
+// Reserved lambda variable for `list_transform`/`list_filter` lambdas. It must never be a
+// scope element `rootVar` (which are "node", root "", or the repeat from_json bridge "el"),
+// so a lambda parameter can never collide with the element it is applied to — DuckDB would
+// otherwise resolve `el.field` inside the lambda against an outer column also named `el`.
+const L = "__el";
+
 export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 
 	function flattenSql(querySegments) {
@@ -72,7 +78,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				sql = `(${rootVar}.${node.value})`
 				outputType = {fhirType: node.type.fhirType, isArray: node.type.isArray, isNav: false}
 			} else if (inputType.fhirType && inputType.isArray) {
-				sql = `list_transform(el -> el.${node.value})${node.type.isArray ? ".flatten()" : ""}`;
+				sql = `list_transform(${L} -> ${L}.${node.value})${node.type.isArray ? ".flatten()" : ""}`;
 				outputType = {fhirType: node.type.fhirType, isArray: true, isNav: false}
 			} else {
 				sql = node.value;
@@ -108,7 +114,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				sql = ["(", flattenSql(leftQuery).sql, node.operator, flattenSql(rightQuery).sql, ")"].join(" ");
 			} else {
 				sql = ["(",
-					`(${flattenSql(leftQuery).sql}).list_transform(el -> el ${node.operator} (${flattenSql(rightQuery).sql})).list_bool_and()`,
+					`(${flattenSql(leftQuery).sql}).list_transform(${L} -> ${L} ${node.operator} (${flattenSql(rightQuery).sql})).list_bool_and()`,
 				")"].join("");
 			}
 			return {sql, outputType: {fhirType: "boolean_expr", isArray: false}};
@@ -135,10 +141,10 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				
 				case 'where':
 					if (inputType && inputType.isArray) {
-						sql = `list_filter(el -> ${flattenSql(astToSql(firstArg, true, {}, "el")).sql})`;
+						sql = `list_filter(${L} -> ${flattenSql(astToSql(firstArg, true, {}, L)).sql})`;
 						outputType = {fhirType: inputType.fhirType, isArray: true}
 					} else if (inputType.fhirType) {
-						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(firstArg, true, {}, "el")).sql}).slice(1)`;
+						sql = `as_list().list_filter(${L} -> ${flattenSql(astToSql(firstArg, true, {}, L)).sql}).slice(1)`;
 						outputType = {fhirType: inputType.fhirType, isArray: false}
 					} else {
 						sql = flattenSql(astToSql(firstArg, undefined, {}, rootVar)).sql;
@@ -155,7 +161,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				case 'exists':
 					if (inputType.isArray) {
 						const sqlExpr = inputType.fhirType == "boolean_expr" ? " = true" : "IS NOT NULL";
-						sql = `list_filter(el -> el ${sqlExpr}).ifnull2([]).len() > 0`					
+						sql = `list_filter(${L} -> ${L} ${sqlExpr}).ifnull2([]).len() > 0`
 					} else {
 						sql = inputType.fhirType == "boolean_expr" ? "is_true()" : "is_not_null()";
 					}
@@ -163,9 +169,9 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 
 				case 'empty':
 					if (inputType.isArray && inputType.fhirType != "boolean_expr") {
-						sql = "ifnull2([NULL]).list_filter(el -> el IS NOT NULL).len() = 0";				
+						sql = `ifnull2([NULL]).list_filter(${L} -> ${L} IS NOT NULL).len() = 0`;
 					} else if (inputType.isArray && inputType.fhirType == "boolean_expr"){
-						sql = "ifnull2([false]).list_filter(el -> el = true).len() = 0";
+						sql = `ifnull2([false]).list_filter(${L} -> ${L} = true).len() = 0`;
 					} else {
 						sql = inputType.fhirType == "boolean_expr" ? "is_false()" : "is_null()";
 					} 
@@ -175,11 +181,11 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				case '_splitPath':
 					return inputType && inputType.isArray
 						? {
-							sql: `list_transform(el -> el.parse_path('/')[${firstArg.value}])`,
+							sql: `list_transform(${L} -> ${L}.parse_path('/')[${firstArg.value}])`,
 							outputType: {isArray: true, fhirType: "string"}
 						}
 						: {
-							sql: `${inLambda ? "el." : ""}parse_path('/')[${firstArg.value}]`, 
+							sql: `${inLambda ? rootVar + "." : ""}parse_path('/')[${firstArg.value}]`,
 							outputType: {isArray: false, fhirType: "string"}
 						}
 
@@ -220,12 +226,12 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 						sql = `{${cols}}`;
 						outputType = {fhirType: inputType.fhirType, isArray: false};
 					} else if (inputType.fhirType && !inputType.isArray) {
-						const cols = node.args.map(a => astToSql(a, true, inputType, "el")).map(flattenSql).map(a => a.sql).join(",");
-						sql = `as_list().list_transform(el -> {${cols}})${orNullSql}`;
+						const cols = node.args.map(a => astToSql(a, true, inputType, L)).map(flattenSql).map(a => a.sql).join(",");
+						sql = `as_list().list_transform(${L} -> {${cols}})${orNullSql}`;
 						outputType = {fhirType: inputType.fhirType, isArray: true};
 					} else {
-						const cols = node.args.map(a => astToSql(a, true, inputType, "el")).map(flattenSql).map(a => a.sql).join(",");
-						sql = `${inLambda ? "el.as_list()." : ""}list_transform(el -> {${cols}})${orNullSql}`;
+						const cols = node.args.map(a => astToSql(a, true, inputType, L)).map(flattenSql).map(a => a.sql).join(",");
+						sql = `${inLambda ? rootVar + ".as_list()." : ""}list_transform(${L} -> {${cols}})${orNullSql}`;
 						outputType = {fhirType: inputType.fhirType, isArray: true};
 					}
 					return {sql, outputType}
@@ -286,7 +292,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 					
 					if (inputType.isArray) {
 						// Macros on array: map over each element
-						sql = `list_transform(el -> el.${macroName}(${macroParams}))`;
+						sql = `list_transform(${L} -> ${L}.${macroName}(${macroParams}))`;
 						outputType = {fhirType: inputType.fhirType, isArray: true};
 					} else {
 						// Macros on scalar: call the function directly

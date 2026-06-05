@@ -83,3 +83,52 @@ describe("staged - repeat typed bridge (arbitrary FHIRPath)", () => {
 		});
 	});
 });
+
+// Regression for REPEAT_LAMBDA_COLLISION_BUG.md: a *column directly in a repeat scope* whose
+// path navigates through an array (e.g. `answer.value.ofType(string)`) compiles to a
+// `list_transform(el -> ...)`. The lambda parameter is hardcoded `el`, which collides with the
+// repeat bridge element (also aliased `el`) — DuckDB binds `el.valueString` to the bridge struct
+// (keys linkId/answer) instead of the lambda element, raising "Could not find key valuestring".
+describe("staged - repeat scope array-navigating column (lambda collision)", () => {
+	const collisionResources = [
+		{
+			resourceType: "QuestionnaireResponse", id: "qrc",
+			item: [
+				{linkId: "a", item: [{linkId: "a.1", answer: [{valueString: "x"}, {valueString: "y"}]}]}
+			]
+		}
+	];
+	const collisionFile = path.join(import.meta.dir, "./spec-tests/_staged-repeat-collision.temp.json");
+	const collisionView = {
+		resource: "QuestionnaireResponse",
+		select: [
+			{column: [{name: "id", path: "id", type: "id"}]},
+			{
+				repeat: ["item"],
+				column: [
+					{name: "linkId", path: "linkId", type: "string"},
+					{name: "answers", path: "answer.value.ofType(string)", collection: true, type: "string"}
+				]
+			}
+		]
+	};
+	const expected = [
+		{id: "qrc", linkId: "a", answers: []},
+		{id: "qrc", linkId: "a.1", answers: ["x", "y"]}
+	];
+
+	beforeAll(async () => { await Bun.write(collisionFile, JSON.stringify(collisionResources)); });
+
+	["natural", "uuid"].forEach(rootKey => {
+		test(`collection column navigating an array inside repeat [${rootKey}]`, async () => {
+			const sql = templateToQuery(
+				collisionView, fhirSchema, stagedQueryTemplate,
+				[["test_file_path", collisionFile]], verbose, true, null, null, "staged", rootKey
+			);
+			if (verbose) console.log(sql);
+			const result = await executeQuery(db, sql);
+			expect(new Set(result.map(r => JSON.stringify(r)))).toEqual(
+				new Set(expected.map(r => JSON.stringify(r))));
+		});
+	});
+});
