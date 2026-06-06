@@ -11,13 +11,12 @@ const testDirectory = path.join(import.meta.dir, "./spec-tests/");
 
 let db;
 
-beforeAll( done => {
-	db = openMemoryDb();
-	done();
+beforeAll(async () => {
+	db = await openMemoryDb();
 });
 
-afterAll( done => {
-	db.close( () => done())
+afterAll(async () => {
+	await db.close();
 });
 
 

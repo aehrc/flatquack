@@ -1,5 +1,5 @@
 WITH transformed AS (
-	SELECT {{fq_sql_transform_expression}} AS result 
+	SELECT {{fq_sql_transform_expression}} 
 	FROM {{ source('fhir_db', '{{fq_vd_resource}}') }}
 	{{fq_where_filter}}
 )

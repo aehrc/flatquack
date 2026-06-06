@@ -2,7 +2,7 @@
 
 COPY (
 	WITH transformed AS (
-		SELECT {{fq_sql_transform_expression}} AS result 
+		SELECT {{fq_sql_transform_expression}} 
 		FROM read_json_auto(
 			'{{fq_input_dir}}/**/*{{fq_vd_resource}}*.ndjson'
 			{{fq_sql_input_schema}}

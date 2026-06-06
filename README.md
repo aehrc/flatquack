@@ -1,4 +1,4 @@
-# FlatQuack
+/o# FlatQuack
 
 **FlatQuack is an open source tool to convert healthcare data in FHIR format into flat CSV, Parquet, JSON, or database tables that are ready for analysis using off-the-shelf tools. Not sure what this means? Check out the overview below :).**
 
@@ -38,6 +38,9 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 | `--template` | `-t` | `@csv` | Path to [template](#templates---template-parameter) to use when generating SQL. May be the name of a [sample template](#sample-templates) or the path to a [custom template](#custom-templates) |
 | `--schema-file` | `-s` | FHIR R4 Schema | Path to a FHIR schema generated using the script included at `./scripts/build-fhir-schema.js`. This can be used to execute ViewDefinitions against FHIR data from versions other than R4.  See the [Generating a FHIR Schema](#generating-a-fhir-schema) seciton below for details.|
 | `--macros` | | | Experimental - Path to file(s) or directory(ies) containing additional SQL macros. Prefix with `@` to reference files in the templates directory. This argument may be repeated. See [details below](#macros---macros-parameter).| 
+| `--backend` | | `struct` | SQL emitter to use: `struct` (the default) or `staged` (the SPEC_hybrid emitter). See [Backends](#backends---backend-parameter) below. |
+| `--root-key` | | `natural` | Staged-backend only. Recombination key used to re-join the root fan-out: `natural` (the resource key) or `uuid` (a synthesized per-resource id). |
+| `--repeat-depth` | | `10` | Struct-backend only. Maximum recursion depth when expanding a `repeat` in a ViewDefinition. |
 | `--param` | | | `name=value` pair of user defined variables to be used when generating SQL with a [custom template](#custom-templates). This argument may be repeated. | 
 | `--var` | | | `name=value` pair of FHIRPath variables for use in ViewDefinition expressions (referenced as `%name`). This argument may be repeated. | 
 | `--verbose` | | false | Print debugging information to the console when running FlatQuack. |
@@ -50,6 +53,21 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 | `run` | Execute the SQL and print the time it took to run in the console. | 
 | `explore` | Execute the SQL and print the query output in the console as JSON. Large queries should use the `build` action and run the resulting SQL files [directly with DuckDB](https://duckdb.org/docs/api/cli/overview#non-interactive-usage). |
 
+## Backends (--backend parameter)
+
+FlatQuack has two SQL emitters that compile a ViewDefinition into different SQL shapes. Both produce
+the same flattened output; they differ in how the SQL is structured and in their performance
+characteristics on different views.
+
+| name | description |
+| --- | --- |
+| `struct` (default) | Compiles the whole projection into a single typed expression over a struct-typed read of the source, flattened with `UNNEST`/joins. A good default for most views. |
+| `staged` | The *SPEC_hybrid* emitter. Walks the ViewDefinition into a chain of staged CTEs, re-joining fan-outs on a recombination key. Better suited to views with deep fan-out forks and to `repeat`. See [docs/SPEC_hybrid.md](./docs/SPEC_hybrid.md) for the design. |
+
+Switching backends is as simple as adding `--backend staged`; the built-in templates resolve to a
+backend-appropriate variant automatically (see below). The `--root-key` parameter tunes the staged
+backend's root recombination; `--repeat-depth` tunes the struct backend's `repeat` expansion.
+
 ## Templates (--template parameter)
 
 ### Sample Templates
@@ -61,6 +79,19 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 | [`@dbt_model`](./templates/dbt_model.sql) | DBT Source named `fhir_db` with tables named as FHIR resource types | SQL Select statement that returns a flat table |
 | [`@dbt_prehook`](./templates/dbt_prehook.sql) | NA | DuckDB SQL macros to load before executing a query generated with FlatQuack |
 | [`@explore`](./templates/explore.sql) (default for the `explore` mode) | NDJSON FHIR Bulk Data files with a `.ndjson` extension and the resource type in the name | Flattened table with up to 10 results |
+
+#### Backend-aware resolution
+
+Built-in `@name` templates resolve to a variant that matches the active `--backend`. When
+`--backend staged` is used, FlatQuack first looks for `templates/staged/<name>.sql` and falls back
+to `templates/<name>.sql` if no staged variant exists. The `struct` backend always uses
+`templates/<name>.sql`. This means `@csv`, `@parquet`, `@ndjson`, `@explore`, and `@dbt_model` all
+work under both backends with no other change.
+
+A practical consequence: if you customize a root template such as `templates/csv.sql`, your change
+applies to the `struct` backend. To customize the `staged` output, edit (or create)
+`templates/staged/csv.sql`. Backend-agnostic templates (`@anonymize`, `@dbt_prehook`) have no staged
+variant and resolve to the root file for both backends.
 
 ### Custom Templates
 FlatQuack uses a very simple template language that replaces specific variables when they're placed between double brackets with values from the current execution (e.g., `{{ fq_input_dir }}`). Variable names and values not in the list below may be passed into the template processor using the `--param` command line argument and will be replaced if they appear they the template. This argument may also be used to pass in values that override the values of the built-in variables. Variables not in the list below or passed in as arguments will not be removed by the template engine to support their use in other processing steps such as DBT pipelines.
@@ -77,6 +108,20 @@ FlatQuack uses a very simple template language that replaces specific variables 
 | `fq_vd_name` | The value in the `name` element of the ViewDefinition |
 | `fq_vd_resource` | The value in the `resource` element of the ViewDefinition |
 | `fq_sql_macros` | DuckDB SQL macros to load before executing a query generated with FlatQuack |
+
+#### Staged backend variables
+
+When `--backend staged` is used, the staged emitter generates most of the query body itself and
+exposes it through the following additional variables (used by the templates under
+`templates/staged/`). These are empty when the `struct` backend is active.
+
+| name | description |
+| --- | --- |
+| `fq_staged_with` | The leading `WITH` keyword for the staged query — `WITH` or `WITH RECURSIVE` (the latter when the ViewDefinition contains a `repeat`). |
+| `fq_staged_src` | The `SELECT` column list of the first (`src`) CTE that reads the source rows. |
+| `fq_staged_src_materialized` | `MATERIALIZED ` (or empty) — applied to the `src` CTE when required by the chosen `--root-key` strategy. |
+| `fq_staged_tail` | The remaining staged CTE chain and the final `SELECT` that produces the flattened rows. Placed immediately after the closing `)` of the `src` CTE. |
+| `fq_staged_macros` | View-specific DuckDB macros emitted by the staged backend. Must appear before the query (in addition to `fq_sql_macros`), as they cannot be hoisted into a shared prehook. |
 
 ## Macros (--macros parameter)
 As an experimental feature, DuckDB macros or native DuckDB functions that accept and return a scalar value may be used in ViewDefinitions processed with FlatQuack. This feature enables custom data transformations, anonymization, and other scalar processing functions to be applied to FHIR data during flattening.

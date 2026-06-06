@@ -9,28 +9,23 @@ import fhirSchema from "../schemas/fhir-schema-r4.json";
 
 let db;
 
-beforeAll( done => {
-	db = openMemoryDb();
-	done();
+beforeAll(async () => {
+	db = await openMemoryDb();
 });
 
-afterAll( done => {
-	db.close( () => done());
+afterAll(async () => {
+	await db.close();
 });
 
-function testQuery(querySegment, resource, duckSchema) {
+async function testQuery(querySegment, resource, duckSchema) {
 	console.log("DuckDB Query: ", querySegment)
 	const filePath = path.join(import.meta.dirname, "./data.temp.json");
 	Bun.write(filePath, JSON.stringify([resource]));
-	const query = duckSchema 
+	const query = duckSchema
 		? `SELECT ${querySegment} AS result FROM read_json('${filePath}', columns=${duckSchema})`
 		: `SELECT ${querySegment} AS result FROM read_json_auto('${filePath}')`;
-	return new Promise( (resolve, reject) => {
-		db.all(query, (err, res) => {
-			if (err) return reject(err);
-			resolve(res[0].result);
-		})
-	})
+	const rows = await db.all(query);
+	return rows[0].result;
 }
 
 function buildQuery(fp, resourceType, schema) {

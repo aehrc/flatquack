@@ -6,7 +6,7 @@ import {Glob} from "bun";
 import {parseArgs} from "util";
 import {templateToQuery} from "./query-builder.js";
 import fhirSchema from "../schemas/fhir-schema-r4.json";
-import duckdb from "duckdb";
+import { DuckDBInstance } from "@duckdb/node-api";
 import {format} from "sql-formatter";
 
 // Read package.json for version info
@@ -28,6 +28,9 @@ Options:
   -s, --schema-file <path>      Custom schema file path (default: built-in FHIR R4 schema)
       --macros <path>           Custom macro file or directory (can be repeated)
       --var <name=value>        Values for FHIRPath constants in ViewDefinition (can be repeated)
+      --backend <name>          SQL emitter: struct|staged (default: struct)
+      --root-key <mode>         Staged root-fork recombination key: natural|uuid (default: natural)
+      --repeat-depth <n>        Max recursion depth for struct-backend repeat (default: 10)
       --param <name=value>      Template parameters (can be used repeated)
       --verbose                 Enable verbose output
       --help                    Show this help message
@@ -56,27 +59,32 @@ function showVersion() {
 	process.exit(0);
 }
 
-function runQuery(sql) {
-	const db = new duckdb.Database(":memory:");
-	const startTime = performance.now()
-	db.run(sql, (err, result) => {
-		if (err) console.warn(err);
-		const duration = Math.round(performance.now() - startTime)
+async function runQuery(sql) {
+	const instance = await DuckDBInstance.create(":memory:");
+	const conn = await instance.connect();
+	const startTime = performance.now();
+	try {
+		await conn.run(sql);
+		const duration = Math.round(performance.now() - startTime);
 		console.log("Completed in " + duration + " ms");
-		db.close();
-	});
+	} catch (err) {
+		console.warn(err);
+	} finally {
+		instance.closeSync();
+	}
 }
 
-function exploreQuery(sql) {
-	const db = new duckdb.Database(":memory:");
-	db.all(sql, (err, result) => {
-		if (err) {
-			console.warn(err);
-		} else {
-			console.log(result)
-		}
-		db.close();
-	});
+async function exploreQuery(sql) {
+	const instance = await DuckDBInstance.create(":memory:");
+	const conn = await instance.connect();
+	try {
+		const result = await conn.runAndReadAll(sql);
+		console.log(result.getRowObjectsJS());
+	} catch (err) {
+		console.warn(err);
+	} finally {
+		instance.closeSync();
+	}
 }
 
 function loadMacros(macroLocations) {
@@ -165,6 +173,9 @@ const args = parseArgs({
 		"macros": {type: "string", multiple: true},
 		"verbose": {type: "boolean"},
 		"mode": {type: "string", short: "m", default: "preview"},
+		"backend": {type: "string", default: "struct"},
+		"root-key": {type: "string", default: "natural"},
+		"repeat-depth": {type: "string", default: "10"},
 		"param": {type: "string", multiple: true},
 		"var": {type: "string", multiple: true},
 		"help": {type: "boolean"},
@@ -181,13 +192,26 @@ if (args.values["version"]) {
 	showVersion();
 }
 
-let templatePath = path.join(import.meta.dir, "../templates/csv.sql");
+// Resolve a built-in `@name` template to a file path. For the staged backend, a
+// `templates/staged/<name>.sql` variant is preferred and the root `templates/<name>.sql`
+// is used as a fallback (so backend-agnostic templates need not be duplicated).
+function resolveBuiltinTemplate(name, backend) {
+	if (backend === "staged") {
+		const stagedPath = path.join(import.meta.dir, "../templates/staged", name + ".sql");
+		if (fs.existsSync(stagedPath)) return stagedPath;
+	}
+	return path.join(import.meta.dir, "../templates", name + ".sql");
+}
+
+let templatePath;
 if (args.values["template"] && args.values["template"][0] == "@") {
-	templatePath = path.join(import.meta.dir, "../templates", args.values["template"].slice(1) + ".sql");
+	templatePath = resolveBuiltinTemplate(args.values["template"].slice(1), args.values["backend"]);
 } else if (args.values["template"]) {
 	templatePath = args.values["template"];
-} else  if (!args.values["template"] && args.values["mode"] == "explore") {
-	templatePath = path.join(import.meta.dir, "../templates/explore.sql");
+} else if (args.values["mode"] == "explore") {
+	templatePath = resolveBuiltinTemplate("explore", args.values["backend"]);
+} else {
+	templatePath = resolveBuiltinTemplate("csv", args.values["backend"]);
 }
 const template = fs.readFileSync(templatePath, "utf-8");
 
@@ -213,7 +237,7 @@ for (const file of glob.scanSync(args.values["view-path"],{onlyFiles:true})) {
 	const outputPath = path.join(path.dirname(inputPath), basename + ".sql");
 
 	const view = JSON.parse(fs.readFileSync(inputPath));
-	const query = templateToQuery(view, schema, template, params, args.values["verbose"], undefined, customMacros, vars);
+	const query = templateToQuery(view, schema, template, params, args.values["verbose"], undefined, customMacros, vars, args.values["backend"], args.values["root-key"], parseInt(args.values["repeat-depth"], 10));
 	const formattedQuery = formatSQL(query);
 
 	if (args.values["mode"] == "build") {
@@ -221,10 +245,10 @@ for (const file of glob.scanSync(args.values["view-path"],{onlyFiles:true})) {
 		fs.writeFileSync(outputPath, formattedQuery);
 	} else if (args.values["mode"] == "run") {
 		console.log("*** running", inputPath, "***");
-		runQuery(formattedQuery);
+		await runQuery(formattedQuery);
 	} else if (args.values["mode"] == "explore") {
 		console.log("*** exploring", inputPath, "***");
-		exploreQuery(formattedQuery);
+		await exploreQuery(formattedQuery);
 	} else { //preview mode
 		console.log("*** compiling", inputPath, "***");
 		console.log(formattedQuery)

@@ -200,8 +200,16 @@ function simplifyFhirPath(node, type = null, schema = {}, vars = {}) {
 
 		case 'ExternalConstant':
 			const varName = node.children[0].terminalNodeText[0].replace(/`/g, '');
+
+			// `%rowIndex` is a contextual environment variable (the 0-based position within the
+			// enclosing iteration), not a user-supplied `--var`. Emit a dedicated segment the
+			// emitter resolves per iteration scope; do NOT route it through the `vars` lookup.
+			if (varName === 'rowIndex') {
+				return [{ segmentType: "rowIndex", type: { fhirType: "integer", isArray: false } }];
+			}
+
 			const varValue = vars[varName];
-			
+
 			if (varValue === undefined) {
 				throw new Error(`Variable %${varName} is not defined. Use --var ${varName}=value to define it.`);
 			}

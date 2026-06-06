@@ -1,3 +1,5 @@
+import {assertSimplePath} from "./repeat-lowering.js";
+
 //a few quick validation checks
 export function validateVd(vd) {
 	
@@ -10,6 +12,12 @@ export function validateVd(vd) {
 
 	function validateElement(node) {
 		let output = [];
+		if (node.repeat) {
+			if (!Array.isArray(node.repeat))
+				throw new Error("repeat elements must be an array of paths");
+			if (node.forEach || node.forEachOrNull)
+				throw new Error("a select element may not contain both a repeat and a forEach/forEachOrNull element");
+		}
 		if (node.forEach || node.forEachOrNull) {
 			if (node.forEach && typeof(node.forEach) != "string")
 				throw new Error("forEach elements must be a string");
@@ -66,9 +74,14 @@ export function validateVd(vd) {
 	validateElement(vd);
 }
 
-export function parseVd(vd, skipValidation) {
+export function parseVd(vd, skipValidation, structRepeat = false) {
 	let tableIndex = 0;
 	let tables = [];
+	// On the struct path each `repeat` becomes a fan-out table whose source list is a reduce
+	// accumulator emitted later (with schema) by the struct backend. `repeats` maps each
+	// `_repeat` directive id to its VD node so that emitter can rebuild the seed and structure.
+	let repeats = {};
+	let repeatSeq = 0;
 
 	function addField(fieldName, parent) {
 		if (!tables.find(t => t.fieldName == fieldName && t.type == "field" && t.parent == parent)) {
@@ -87,12 +100,56 @@ export function parseVd(vd, skipValidation) {
 		return name;
 	}
 
-	function parseNode(node, isRoot, inUnion, parentTable) {
+	// The repeat seed paths used by the direct children of a scope: a sibling `forEach` over one
+	// of these shares the field with a `repeat`, which forces it to JSON[], so that `forEach` must
+	// also read it through the `from_json` bridge (the shared-field case, design D3).
+	const scopeRepeatSeeds = children => new Set((children || []).filter(c => c.repeat).flatMap(c => c.repeat));
+
+	function parseNode(node, isRoot, inUnion, parentTable, scopeForced = new Set()) {
+		// A `repeat` directive descends its listed paths recursively. In `_rseed` mode (the
+		// default, used by the staged backend and by the schema/structure derivation) we only
+		// surface the seed fields — each lands childless, hence as raw JSON[] (a recursive FHIR
+		// type is not a finite STRUCT) — and the body is not walked. In `structRepeat` mode the
+		// repeat becomes a fan-out: a CROSS JOIN table (reusing the `each` mechanism) whose body
+		// is walked so nested fan-outs chain as child tables, and a `_repeat` directive carrying
+		// the seed nav + body so the emitter can wrap a reduce accumulator around it (design D7).
+		if (node.repeat && !isRoot) {
+			if (!structRepeat)
+				return node.repeat.map(p => `_col('_rseed', ${p})`).join(", ");
+			node.repeat.forEach(assertSimplePath);
+			const id = `rep_${++repeatSeq}`;
+			repeats[id] = node;
+			let bodyTable = parentTable;
+			if (!inUnion) {
+				tables.push({type: "repeat", parent: parentTable, name: id, allowNull: false});
+				bodyTable = id;
+			}
+			const rest = parseNode({...node, repeat: undefined}, false, false, bodyTable);
+			const repeatExpr = `_repeat('${id}', ${node.repeat[0]}._forEach(${rest}))`;
+			return inUnion ? repeatExpr : `_col_collection('${id}', ${repeatExpr})`;
+		}
+
 		if (node.forEach || node.forEachOrNull) {
+			const field = node.forEach || node.forEachOrNull;
+			// Shared-field case: a sibling `repeat` forces this `forEach`'s field to JSON[], so it
+			// is read through the `from_json` bridge via a `_jsoneach` directive (design D3).
+			if (structRepeat && scopeForced.has(field)) {
+				const id = `rep_${++repeatSeq}`;
+				repeats[id] = node;
+				let bodyTable = parentTable;
+				if (!inUnion) {
+					tables.push({type: node.forEachOrNull ? "nullEach" : "repeat", parent: parentTable, name: id, allowNull: !!node.forEachOrNull});
+					bodyTable = id;
+				}
+				const rest = parseNode({...node, forEach: undefined, forEachOrNull: undefined}, false, false, bodyTable);
+				const eachFn = node.forEachOrNull ? "_forEachOrNull" : "_forEach";
+				const expr = `_jsoneach('${id}', ${field}.${eachFn}(${rest}))`;
+				return inUnion ? expr : `_col_collection('${id}', ${expr})`;
+			}
 			const eachTable = !inUnion ? addTable(node.forEach ? "each" : "nullEach", parentTable, !!node.forEachOrNull) : parentTable;
 			if (inUnion && node.forEachOrNull) updateTable(eachTable, true);
 			const rest = parseNode({...node, forEach: undefined, forEachOrNull: undefined}, false, false, eachTable);
-			const path = `${node.forEach || node.forEachOrNull}.${node.forEachOrNull ? "_forEachOrNull" : "_forEach"}(${rest})`;
+			const path = `${field}.${node.forEachOrNull ? "_forEachOrNull" : "_forEach"}(${rest})`;
 			return !inUnion ? `_col_collection('${eachTable}', ${path})` : path;
 		}
 
@@ -100,13 +157,16 @@ export function parseVd(vd, skipValidation) {
 		if (node.column) {
 			node.column.forEach( c => addField(c.name, parentTable) );
 			const columns = node.column.map( c => `_col${c.collection ? "_collection" : ""}('${c.name}', ${c.path||c.name})` );
-			output.push(inUnion ? `_forEach(${columns})` : columns);
+			// `_project` (not `_forEach`): a column projection at a scope, NOT an iteration — it
+			// must not open a `%rowIndex` scope, so the emitter passes the enclosing index through.
+			output.push(inUnion ? `_project(${columns})` : columns);
 		}
 
 		if (node.select) {
-			const path = node.select.map( n => parseNode(n, false, false, parentTable) );
-			// output.push(isRoot ? `_forEach(${path.join(", ")})` : path);
-			output.push(isRoot || inUnion ? `_forEach(${path.join(", ")})` : path);
+			const forced = scopeRepeatSeeds(node.select);
+			const path = node.select.map( n => parseNode(n, false, false, parentTable, forced) );
+			// The root/union `select` wrapper is a projection (`_project`), not an iteration.
+			output.push(isRoot || inUnion ? `_project(${path.join(", ")})` : path);
 		}
 		
 		if (node.unionAll) {
@@ -116,7 +176,7 @@ export function parseVd(vd, skipValidation) {
 			const unionPath = inUnion
 				? `_unionAll(${path.join(", ")})`
 				: `_col_collection('${unionTable}', _unionAll(${path.join(", ")}))`;
-			output.push(isRoot ? `_forEach(${unionPath})` : unionPath);
+			output.push(isRoot ? `_project(${unionPath})` : unionPath);
 		}
 
 		return output.join(", ");
@@ -124,7 +184,7 @@ export function parseVd(vd, skipValidation) {
 
 	if (!skipValidation) validateVd(vd);
 	const path = parseNode(vd, true);
-	return {path, tables}
+	return {path, tables, repeats}
 }
 
 export function extractPathsFromAst(node) {
