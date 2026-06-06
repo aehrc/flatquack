@@ -51,6 +51,39 @@ function subtreeHasFork(node) {
 	return fanouts.some(f => (f.type === "each" || f.type === "repeat") && subtreeHasFork(f.node));
 }
 
+// Raw-string `%rowIndex` detection, used ONLY for the structural look-ahead that forces a partition
+// key down a spine to a `%rowIndex` repeat (design D3). Over-approximation is safe here: a false
+// positive can only force an extra, harmless carried key, never alter a `%rowIndex`-free view (which
+// contains no `%rowIndex` token to match). The precise per-scope binding decision still parses the
+// resolved AST (`scopeUsesRowIndex`), so this raw scan never affects which value is emitted.
+function pathMentionsRowIndex(p) {
+	return typeof p === "string" && /%rowIndex\b/.test(p);
+}
+function unionBranchesMentionRowIndex(branches) {
+	return branches.some(b => {
+		if (b.unionAll) return unionBranchesMentionRowIndex(b.unionAll);
+		if (b.forEach || b.forEachOrNull || b.repeat) return false; // opens its own scope
+		return (b.column || []).some(c => pathMentionsRowIndex(c.path || c.name));
+	});
+}
+// Does a `repeat`'s own scope (direct + transparently-merged columns, and columns-only `unionAll`
+// branches) reference `%rowIndex`? Mirrors the candidate set of `scopeUsesRowIndex`.
+function repeatScopeUsesRowIndex(repeatNode) {
+	const {columns, fanouts} = collectScope(repeatNode);
+	if (columns.some(c => pathMentionsRowIndex(c.path || c.name))) return true;
+	return fanouts.filter(f => f.type === "union")
+		.some(f => unionBranchesMentionRowIndex(f.node.unionAll));
+}
+// Does any `repeat` anywhere in `node`'s subtree have a body that references `%rowIndex`? Forces the
+// resource key (`rid`) and the enclosing iterating steps' ordinals to be minted on the spine down to
+// that repeat, so its pre-order window can partition by the enclosing-scope instance (design D3).
+function subtreeHasRepeatUsingRowIndex(node) {
+	if (!node || typeof node !== "object") return false;
+	if (node.repeat && repeatScopeUsesRowIndex(node)) return true;
+	return (node.select || []).some(subtreeHasRepeatUsingRowIndex)
+		|| (node.unionAll || []).some(subtreeHasRepeatUsingRowIndex);
+}
+
 // VD column names in document (tree) order — the output projection contract.
 function columnOrder(node) {
 	let names = [];
@@ -153,7 +186,11 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 
 	const viewHasRepeat = hasRepeat(vd);
 	const viewHasFork = subtreeHasFork(vd);
-	const rootKey = viewHasFork ? ["rid"] : [];
+	// A `%rowIndex` repeat needs a per-resource (or per-enclosing-instance) partition key even when
+	// the view has no fork, so force the root `rid` whenever any repeat below uses `%rowIndex` (D3).
+	const viewHasRepeatRowIndex = subtreeHasRepeatUsingRowIndex(vd);
+	const forceRootKey = viewHasFork || viewHasRepeatRowIndex;
+	const rootKey = forceRootKey ? ["rid"] : [];
 
 	// Cast macros: each distinct `from_json` structure becomes one `fq_cast_*` macro emitted
 	// in the preamble; identical structures (e.g. a repeat's single canonical descent type)
@@ -186,12 +223,12 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	// Natural-key mode reads the resource key, which the ViewDefinition need not otherwise
 	// reference; expose its AST so the caller can add it to the typed read schema. Lazy: only
 	// when a fork actually needs the key (chain-only views and "uuid" mode add nothing).
-	const resourceKeyAst = (viewHasFork && rootKeyMode === "natural")
+	const resourceKeyAst = (forceRootKey && rootKeyMode === "natural")
 		? fhirpathToAst("getResourceKey()", vd.resource, schema, vars)
 		: null;
 	// "uuid()" is volatile: the source scope must be materialised so it is evaluated exactly
-	// once per resource and both branches join on the same key.
-	const srcMaterialized = viewHasFork && rootKeyMode === "uuid";
+	// once per resource (so fork branches and a repeat's recursive descent all observe the same key).
+	const srcMaterialized = forceRootKey && rootKeyMode === "uuid";
 
 	// Prepare a repeat fan-out: validate its paths, resolve the descent element type, and
 	// materialise the seed array into the owning stage's projection.
@@ -201,6 +238,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		f.childElem = B.childElemOf(f.listedPaths[0], elem);
 		f.seedCol = name("a") + "_seed";
 		stageSelect.push(`${typedSeed(f.listedPaths, elem, B)} AS ${f.seedCol}`);
+		// Does the repeat body reference `%rowIndex`? Parse against the typed bridge element it will be
+		// evaluated under (D4) — drives the pre-order path + window in `emitRepeat`.
+		f.usesRowIndex = scopeUsesRowIndex(f.node, bridgeElem(f.childElem.seed));
 		// A seed field read in a typed scope must be JSON[] even if a sibling forEach types it.
 		if (schemaPrefix) f.listedPaths.forEach(p =>
 			forcedJsonPaths.push([...schemaPrefix, ...p.split(".")].join(".")));
@@ -213,19 +253,44 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		const carryProj = (rel) => carryCols.map(c => `${rel}.${c}`);
 		const lead = (cols) => cols.length ? cols.join(", ") + ", " : "";
 
+		// `%rowIndex` over a repeat (D1-D3): carry an integer descent `path` (the per-level ordinals
+		// from the seed to a node) through both legs when this repeat's body uses `%rowIndex`, OR a
+		// repeat nested in its body does — the latter needs THIS repeat's own index as its partition
+		// surrogate. Ordering the `BIGINT[]` path element-wise gives depth-first pre-order
+		// (`[1] < [1,1] < [1,2] < [2]`); the index is assigned by a window at the bridge (one row per
+		// visited node, before any fork recombination) and materialised as a scalar that survives joins.
+		const innerNeedsOuterRn = (f.node.select || []).some(subtreeHasRepeatUsingRowIndex)
+			|| (f.node.unionAll || []).some(subtreeHasRepeatUsingRowIndex);
+		const needRepRn = f.usesRowIndex || innerNeedsOuterRn;
+
 		const repName = name("rep");
-		const seedLeg = `SELECT ${lead(carryProj(parentRel))}_s.node AS node\n    FROM ${parentRel}, UNNEST(${parentRel}.${f.seedCol}) AS _s(node)`;
-		const recLeg = `SELECT ${lead(carryProj(repName))}_r.node\n    FROM ${repName}, UNNEST(${jsonFold(f.listedPaths, `${repName}.node`)}) AS _r(node)`;
+		const seedPath = needRepRn ? `[ord]::BIGINT[] AS path, ` : "";
+		const recPath = needRepRn ? `list_append(${repName}.path, ord), ` : "";
+		const seedOrd = needRepRn ? ` WITH ORDINALITY AS _s(node, ord)` : ` AS _s(node)`;
+		const recOrd = needRepRn ? ` WITH ORDINALITY AS _r(node, ord)` : ` AS _r(node)`;
+		const seedLeg = `SELECT ${lead(carryProj(parentRel))}${seedPath}_s.node AS node\n    FROM ${parentRel}, UNNEST(${parentRel}.${f.seedCol})${seedOrd}`;
+		const recLeg = `SELECT ${lead(carryProj(repName))}${recPath}_r.node\n    FROM ${repName}, UNNEST(${jsonFold(f.listedPaths, `${repName}.node`)})${recOrd}`;
 		ctes.push(`${repName} AS (\n    ${seedLeg}\n    UNION ALL\n    ${recLeg}\n  )`);
 
 		const structure = B.repeatStructure(f.node, f.childElem.seed);
 		const cast = `${castMacroFor(structure, f.childElem.seed)}(node)`;
 		const bridge = name("repb");
-		ctes.push(`${bridge} AS (\n  SELECT ${lead(carryCols)}${cast} AS el\n  FROM ${repName}\n)`);
+		const bodyElem = bridgeElem(f.childElem.seed);
+		let bodyKeyCols = keyCols;
+		if (needRepRn) {
+			const rnCol = name("rrn");
+			const part = keyCols.length ? `PARTITION BY ${keyCols.join(", ")} ` : "";
+			const rn = `(row_number() OVER (${part}ORDER BY path) - 1)::INTEGER AS ${rnCol}`;
+			ctes.push(`${bridge} AS (\n  SELECT ${lead(carryCols)}${rn}, ${cast} AS el\n  FROM ${repName}\n)`);
+			if (f.usesRowIndex) bodyElem.rowIndexSql = rnCol;            // this repeat's own %rowIndex
+			if (innerNeedsOuterRn) bodyKeyCols = [...keyCols, rnCol];    // surrogate for a nested repeat
+		} else {
+			ctes.push(`${bridge} AS (\n  SELECT ${lead(carryCols)}${cast} AS el\n  FROM ${repName}\n)`);
+		}
 
 		// The body of a repeat is evaluated in `json` mode (its element is the from_json `el`);
 		// nested repeat seeds arrive as `el.<field>` JSON[] and re-enter `WITH RECURSIVE`.
-		return emitScope(f.node, bridgeElem(f.childElem.seed), carried, keyCols, bridge, false, null);
+		return emitScope(f.node, bodyElem, carried, bodyKeyCols, bridge, false, null);
 	}
 
 	// The typed element produced by a from_json bridge over a JSON node column.
@@ -244,7 +309,11 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		const cast = `${castMacroFor(structure, f.childElem.seed)}(node)`;
 		const bridge = name("repb");
 		ctes.push(`${bridge} AS (\n  SELECT ${carryCols.length ? carryCols.join(", ") + ", " : ""}${cast} AS el\n  FROM ${from}\n)`);
-		return emitScope(f.node, bridgeElem(f.childElem.seed), carried, childKey, bridge, false, null);
+		// `%rowIndex` of this shared-field iteration: the ordinal (carried via childKey) less one. Same
+		// binding as a typed `forEach`, but on the from_json bridge element.
+		const bodyElem = bridgeElem(f.childElem.seed);
+		if (ordName && f.usesRowIndex) bodyElem.rowIndexSql = rowIndexExpr(ordName, f.orNull);
+		return emitScope(f.node, bodyElem, carried, childKey, bridge, false, null);
 	}
 
 	// emitScope: builds a stage exposing keyCols + carried + this scope's columns, then
@@ -278,10 +347,10 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			f.arrCol = name("a") + "_arr";
 			f.orNull = !!f.node.forEachOrNull;
 			f.childElem = B.childElemOf(path, elem);
-			// The ordinal is needed for fork recombination (a key) OR to realise `%rowIndex` (a value
-			// read in the child stage). Track the two reasons separately: only forks add it to the key
-			// chain; the index-only case just needs it aliased in the FROM (design D2).
-			f.forkOrd = subtreeHasFork(f.node);
+			// The ordinal becomes a carried KEY when a fork below needs it for recombination OR a
+			// `%rowIndex` repeat below needs it as a partition surrogate (design D2/D3); it is needed
+			// merely as a VALUE (aliased, not keyed) when this scope itself reads `%rowIndex`.
+			f.forkOrd = subtreeHasFork(f.node) || subtreeHasRepeatUsingRowIndex(f.node);
 			f.usesRowIndex = scopeUsesRowIndex(f.node, f.childElem);
 			f.needsOrd = f.forkOrd || f.usesRowIndex;
 			f.segs = path.split(".");
@@ -330,13 +399,16 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		const branches = [];
 		realFanouts.forEach(f => {
 			// Fork siblings recombine on `keyCols` (the cross product), so the iteration itself needs
-			// no ordinal key here; expose one ONLY when the branch reads `%rowIndex`, as a value in its
-			// own stage (not a key). This keeps existing fork recombination byte-for-byte unchanged.
-			const ordName = f.usesRowIndex ? `ord${keyCols.length}` : null;
-			if (ordName) f.childElem.rowIndexSql = rowIndexExpr(ordName, f.orNull);
+			// no ordinal key here; expose one as a VALUE when the branch reads `%rowIndex`, and as a
+			// carried branch KEY when a `%rowIndex` repeat below it needs the ordinal as a partition
+			// surrogate (D3). Without a repeat below, this stays byte-for-byte the prior fork behavior.
+			const repBelow = subtreeHasRepeatUsingRowIndex(f.node);
+			const ordName = (f.usesRowIndex || repBelow) ? `ord${keyCols.length}` : null;
+			if (ordName && f.usesRowIndex) f.childElem.rowIndexSql = rowIndexExpr(ordName, f.orNull);
+			const branchKey = (repBelow && ordName) ? [...keyCols, ordName] : keyCols;
 			const br = f.jsonMode
-				? emitJsonEach(f, relName, [], keyCols, null)
-				: emitScope(f.node, f.childElem, [], keyCols, unnestFrom(relName, f, ordName), false, null);
+				? emitJsonEach(f, relName, [], keyCols, ordName)
+				: emitScope(f.node, f.childElem, [], branchKey, unnestFrom(relName, f, ordName), false, null);
 			branches.push({rel: br.rel, cols: br.cols, kind: f.orNull ? "LEFT" : "INNER"});
 		});
 		repeatFanouts.forEach(f => {

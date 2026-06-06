@@ -9,10 +9,11 @@ import fhirSchema from "../schemas/fhir-schema-r4.json";
 const verbose = process.env.VERBOSE === "1";
 const testDirectory = path.join(import.meta.dir, "./spec-tests/");
 
-// `%rowIndex` is implemented on the staged backend (change `add-rowindex-staged`); the full
-// `row_index` suite runs here. The `repeat` sub-test pins SQL-on-FHIR depth-first pre-order
-// numbering, which the staged breadth-first `WITH RECURSIVE` descent does not reproduce; it is a
-// known follow-up (`add-rowindex-repeat-preorder`), left failing exactly as the struct suite is.
+// `%rowIndex` is fully implemented on the staged backend, including the `repeat` sub-test, whose
+// SQL-on-FHIR depth-first pre-order numbering is realized via a materialized integer descent path
+// and a path-ordered window (change `add-rowindex-repeat-preorder`). Extended repeat cases not
+// covered by the official `row_index.json` live in `row_index_repeat.json` (staged-only, run by
+// `tests/row-index-repeat.test.js`).
 const EXCLUDE = null;
 
 let db;
