@@ -192,13 +192,26 @@ if (args.values["version"]) {
 	showVersion();
 }
 
-let templatePath = path.join(import.meta.dir, "../templates/csv.sql");
+// Resolve a built-in `@name` template to a file path. For the staged backend, a
+// `templates/staged/<name>.sql` variant is preferred and the root `templates/<name>.sql`
+// is used as a fallback (so backend-agnostic templates need not be duplicated).
+function resolveBuiltinTemplate(name, backend) {
+	if (backend === "staged") {
+		const stagedPath = path.join(import.meta.dir, "../templates/staged", name + ".sql");
+		if (fs.existsSync(stagedPath)) return stagedPath;
+	}
+	return path.join(import.meta.dir, "../templates", name + ".sql");
+}
+
+let templatePath;
 if (args.values["template"] && args.values["template"][0] == "@") {
-	templatePath = path.join(import.meta.dir, "../templates", args.values["template"].slice(1) + ".sql");
+	templatePath = resolveBuiltinTemplate(args.values["template"].slice(1), args.values["backend"]);
 } else if (args.values["template"]) {
 	templatePath = args.values["template"];
-} else  if (!args.values["template"] && args.values["mode"] == "explore") {
-	templatePath = path.join(import.meta.dir, "../templates/explore.sql");
+} else if (args.values["mode"] == "explore") {
+	templatePath = resolveBuiltinTemplate("explore", args.values["backend"]);
+} else {
+	templatePath = resolveBuiltinTemplate("csv", args.values["backend"]);
 }
 const template = fs.readFileSync(templatePath, "utf-8");
 
