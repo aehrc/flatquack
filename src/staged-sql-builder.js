@@ -60,13 +60,26 @@ function columnOrder(node) {
 	return names.filter((n, i) => names.indexOf(n) === i);
 }
 
+// Deep-walk a FHIRPath AST (nested arrays of segments, each with possible `args`/`type`
+// sub-trees) for the contextual `%rowIndex` segment emitted by the front end. Used to decide,
+// before a column is compiled, whether its enclosing iteration must expose a `WITH ORDINALITY`
+// ordinal (design D5). The AST is a finite tree, so the recursion terminates.
+function astHasRowIndex(node) {
+	if (Array.isArray(node)) return node.some(astHasRowIndex);
+	if (node && typeof node === "object") {
+		if (node.segmentType === "rowIndex") return true;
+		return Object.values(node).some(astHasRowIndex);
+	}
+	return false;
+}
+
 // --- leaf compilation (reuses the typed engine) ---------------------------
 
 export function makeBuilder(schema, vars) {
 
 	function compilePath(pathStr, elem) {
 		const ast = fhirpathToAst(pathStr, elem.seed, schema, vars);
-		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el");
+		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el", elem.rowIndexSql || "0");
 		return {sql: out.sql, outputType: out.outputType, type: ast.type};
 	}
 
@@ -74,7 +87,7 @@ export function makeBuilder(schema, vars) {
 		const pathExpr = col.path || col.name;
 		const fpStr = `_col${col.collection ? "_collection" : ""}('${col.name}', ${pathExpr})`;
 		const ast = fhirpathToAst(fpStr, elem.seed, schema, vars);
-		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el");
+		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el", elem.rowIndexSql || "0");
 		const expr = out.sql.replace(new RegExp(`^'${col.name}':\\s*`), "");
 		return {name: col.name, expr, sql: `${expr} AS ${col.name}`};
 	}
@@ -106,6 +119,37 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	const ctes = [];
 	let counter = 0;
 	const name = (base) => `${base}_${++counter}`;
+
+	// `%rowIndex` for an iteration's body: the 0-based position from the 1-based `WITH ORDINALITY`
+	// ordinal. A `forEachOrNull` over an empty collection yields a null row whose ordinal is NULL,
+	// which must report 0 — hence the coalesce (design D3, the staged analog of struct source-padding).
+	// DuckDB's ORDINALITY is BIGINT, but `%rowIndex` is an INTEGER, so cast (matching the struct emitter).
+	const rowIndexExpr = (ord, orNull) =>
+		(orNull ? `(coalesce(${ord}, 1) - 1)` : `(${ord} - 1)`) + "::INTEGER";
+
+	// Does `pathExpr`, evaluated against `elem`, reference `%rowIndex`? Parse it (cheap at build
+	// time) and look for the contextual segment rather than pattern-matching the raw string (D5).
+	const pathUsesRowIndex = (pathExpr, elem) =>
+		astHasRowIndex(fhirpathToAst(pathExpr, elem.seed, schema, vars));
+
+	// Does any column compiled against THIS scope's element reference `%rowIndex` — i.e. does the
+	// enclosing iteration need to expose an ordinal? Candidates are the scope's own (direct +
+	// transparently merged) columns and any columns-only `unionAll` branch (which materialises into
+	// this stage). A nested `forEach`/`repeat`, or a `forEach`/`repeat` union branch, opens its own
+	// ordinal and is detected when ITS parent makes the same decision, so they are excluded (D5).
+	function scopeUsesRowIndex(node, elem) {
+		const {columns, fanouts} = collectScope(node);
+		if (columns.some(c => pathUsesRowIndex(c.path || c.name, elem))) return true;
+		return fanouts.filter(f => f.type === "union")
+			.some(f => unionColsOnlyUseRowIndex(f.node.unionAll, elem));
+	}
+	function unionColsOnlyUseRowIndex(branches, elem) {
+		return branches.some(b => {
+			if (b.unionAll) return unionColsOnlyUseRowIndex(b.unionAll, elem);
+			if (b.forEach || b.forEachOrNull || b.repeat) return false; // opens its own ordinal
+			return (b.column || []).some(c => pathUsesRowIndex(c.path || c.name, elem));
+		});
+	}
 
 	const viewHasRepeat = hasRepeat(vd);
 	const viewHasFork = subtreeHasFork(vd);
@@ -234,7 +278,12 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			f.arrCol = name("a") + "_arr";
 			f.orNull = !!f.node.forEachOrNull;
 			f.childElem = B.childElemOf(path, elem);
-			f.needsOrd = subtreeHasFork(f.node);
+			// The ordinal is needed for fork recombination (a key) OR to realise `%rowIndex` (a value
+			// read in the child stage). Track the two reasons separately: only forks add it to the key
+			// chain; the index-only case just needs it aliased in the FROM (design D2).
+			f.forkOrd = subtreeHasFork(f.node);
+			f.usesRowIndex = scopeUsesRowIndex(f.node, f.childElem);
+			f.needsOrd = f.forkOrd || f.usesRowIndex;
 			f.segs = path.split(".");
 			stageSelect.push(`${B.arrayize(path, elem)} AS ${f.arrCol}`);
 		});
@@ -261,7 +310,10 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			if (realFanouts.length === 1) {
 				const f = realFanouts[0];
 				const ordName = f.needsOrd ? `ord${keyCols.length}` : null;
-				const childKey = ordName ? [...keyCols, ordName] : keyCols;
+				// Only a fork carries the ordinal forward as a recombination key; the index-only case
+				// reads it in the immediate child stage and materialises `%rowIndex` as a data column.
+				const childKey = f.forkOrd && ordName ? [...keyCols, ordName] : keyCols;
+				if (ordName) f.childElem.rowIndexSql = rowIndexExpr(ordName, f.orNull);
 				if (f.jsonMode) return emitJsonEach(f, relName, carriedAfter, keyCols, ordName);
 				const from = unnestFrom(relName, f, ordName);
 				const childPrefix = schemaPrefix ? [...schemaPrefix, ...f.segs] : null;
@@ -277,9 +329,14 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		// FORK
 		const branches = [];
 		realFanouts.forEach(f => {
+			// Fork siblings recombine on `keyCols` (the cross product), so the iteration itself needs
+			// no ordinal key here; expose one ONLY when the branch reads `%rowIndex`, as a value in its
+			// own stage (not a key). This keeps existing fork recombination byte-for-byte unchanged.
+			const ordName = f.usesRowIndex ? `ord${keyCols.length}` : null;
+			if (ordName) f.childElem.rowIndexSql = rowIndexExpr(ordName, f.orNull);
 			const br = f.jsonMode
 				? emitJsonEach(f, relName, [], keyCols, null)
-				: emitScope(f.node, f.childElem, [], keyCols, unnestFrom(relName, f, null), false, null);
+				: emitScope(f.node, f.childElem, [], keyCols, unnestFrom(relName, f, ordName), false, null);
 			branches.push({rel: br.rel, cols: br.cols, kind: f.orNull ? "LEFT" : "INNER"});
 		});
 		repeatFanouts.forEach(f => {
@@ -332,7 +389,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 				const path = b.forEach || b.forEachOrNull;
 				const arrCol = name("u") + "_arr";
 				stageSelect.push(`${B.arrayize(path, elem)} AS ${arrCol}`);
-				return {node: b, arrCol, orNull: !!b.forEachOrNull, childElem: B.childElemOf(path, elem)};
+				const childElem = B.childElemOf(path, elem);
+				return {node: b, arrCol, orNull: !!b.forEachOrNull, childElem,
+					usesRowIndex: scopeUsesRowIndex(b, childElem)};
 			}
 			// columns only (no iteration): materialise each column expr in the stage
 			// (the scope element is available there but not carried downstream)
@@ -360,9 +419,14 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 					const sel = [...keyCols, ...carried, ...bodyCols];
 					parts.push(`SELECT ${sel.join(", ")} FROM ${br.rel}`);
 				} else if (e.arrCol) {
-					const join = e.orNull
-						? `${srcRel}\n  LEFT JOIN UNNEST(${srcRel}.${e.arrCol}) AS _b${++counter}(node) ON TRUE`
-						: `${srcRel}, UNNEST(${srcRel}.${e.arrCol}) AS _b${++counter}(node)`;
+					// Each forEach branch has its own ordinal, so `%rowIndex` numbers independently from 0.
+					const a = `_b${++counter}`;
+					const ordName = e.usesRowIndex ? `uord${counter}` : null;
+					if (ordName) e.childElem.rowIndexSql = rowIndexExpr(ordName, e.orNull);
+					const unnest = ordName
+						? `UNNEST(${srcRel}.${e.arrCol}) WITH ORDINALITY AS ${a}(node, ${ordName})`
+						: `UNNEST(${srcRel}.${e.arrCol}) AS ${a}(node)`;
+					const join = e.orNull ? `${srcRel}\n  LEFT JOIN ${unnest} ON TRUE` : `${srcRel}, ${unnest}`;
 					const colProjs = (e.node.column || []).map(c => B.compileColumn(c, e.childElem));
 					cols = cols || colProjs.map(c => c.name);
 					const sel = [...keyCols, ...carried, ...colProjs.map(c => c.sql)];
@@ -381,7 +445,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		return {rel: uName, cols: [...carried, ...cols]};
 	}
 
-	const rootElem = {ref: null, inLambda: false, seed: vd.resource, inputType: {}};
+	const rootElem = {ref: null, inLambda: false, seed: vd.resource, inputType: {}, rowIndexSql: "0"};
 	const result = emitScope(vd, rootElem, [], rootKey, null, true, []);
 
 	const order = columnOrder(vd);

@@ -9,10 +9,11 @@ import fhirSchema from "../schemas/fhir-schema-r4.json";
 const verbose = process.env.VERBOSE === "1";
 const testDirectory = path.join(import.meta.dir, "./spec-tests/");
 
-// `%rowIndex` is implemented on the struct backend only (change `add-rowindex-struct`); staged
-// parity is a follow-up, so the `row_index` suite is excluded here. Everything else, including
-// the official `repeat` suite, runs on the staged backend.
-const EXCLUDE = /^row_index/;
+// `%rowIndex` is implemented on the staged backend (change `add-rowindex-staged`); the full
+// `row_index` suite runs here. The `repeat` sub-test pins SQL-on-FHIR depth-first pre-order
+// numbering, which the staged breadth-first `WITH RECURSIVE` descent does not reproduce; it is a
+// known follow-up (`add-rowindex-repeat-preorder`), left failing exactly as the struct suite is.
+const EXCLUDE = null;
 
 let db;
 
@@ -24,7 +25,7 @@ let testFiles = [];
 
 files.forEach( f => {
 	if (/\.temp\.json|skip$|^\./.test(f)) return;
-	if (EXCLUDE.test(f)) return;
+	if (EXCLUDE && EXCLUDE.test(f)) return;
 	const testGroup = JSON.parse(fs.readFileSync(path.join(testDirectory, f)))
 	if (!testGroup.skip)
 		testFiles.push({fileName: f, testGroup});
