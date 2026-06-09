@@ -30,6 +30,7 @@ Options:
       --var <name=value>        Values for FHIRPath constants in ViewDefinition (can be repeated)
       --param <name=value>      Template parameters (can be used repeated)
       --verbose                 Enable verbose output
+      --strict                  Reject unsupported/unknown select directives instead of ignoring them
       --help                    Show this help message
       --version                 Show version information
 
@@ -164,6 +165,7 @@ const args = parseArgs({
 		"schema-file": {type: "string", short: "s"},
 		"macros": {type: "string", multiple: true},
 		"verbose": {type: "boolean"},
+		"strict": {type: "boolean"},
 		"mode": {type: "string", short: "m", default: "preview"},
 		"param": {type: "string", multiple: true},
 		"var": {type: "string", multiple: true},
@@ -213,7 +215,7 @@ for (const file of glob.scanSync(args.values["view-path"],{onlyFiles:true})) {
 	const outputPath = path.join(path.dirname(inputPath), basename + ".sql");
 
 	const view = JSON.parse(fs.readFileSync(inputPath));
-	const query = templateToQuery(view, schema, template, params, args.values["verbose"], undefined, customMacros, vars);
+	const query = templateToQuery(view, schema, template, params, args.values["verbose"], undefined, customMacros, vars, args.values["strict"]);
 	const formattedQuery = formatSQL(query);
 
 	if (args.values["mode"] == "build") {
