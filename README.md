@@ -41,6 +41,7 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 | `--param` | | | `name=value` pair of user defined variables to be used when generating SQL with a [custom template](#custom-templates). This argument may be repeated. | 
 | `--var` | | | `name=value` pair of FHIRPath variables for use in ViewDefinition expressions (referenced as `%name`). This argument may be repeated. | 
 | `--verbose` | | false | Print debugging information to the console when running FlatQuack. |
+| `--strict` | | false | Reject unsupported/unknown directives on a `select` element (e.g. `repeat`) instead of silently ignoring them. Note: this only validates `select`-element directives — it does not check column-level keys or root-level ViewDefinition keys, so it is not a full schema validation. |
 
 #### Modes (--mode parameter)
 | name | description |
