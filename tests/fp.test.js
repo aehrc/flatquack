@@ -256,6 +256,74 @@ describe("basic fhirpath to duckdb sql", () => {
 		expect(result).toEqual(target);
 	});
 
+	// exists(<criterion>) must apply its argument. No name has use='fake', so
+	// this must be false (a criterion-ignoring implementation returns true
+	// because some name exists).
+	test("exists on list with criteria matching nothing", async () => {
+		const fp = "name.exists(use='fake')";
+		const resource = multipleNames;
+		const target = false;
+		const query = buildQuery(fp, resource.resourceType, fhirSchema);
+		const result = await testQuery(query, resource);
+		expect(result).toEqual(target);
+	});
+
+	// where() with a multi-segment predicate must compile the whole chain.
+	// `given.exists()` is [seg(given), fn(exists)]; truncating it to `el.given`
+	// (a list, not a boolean) would fail the list_filter lambda. Only the
+	// second name (nickname) has `given`, so family -> ["f2"].
+	test("where with multi-segment predicate", async () => {
+		const fp = "name.where(given.exists()).family";
+		const resource = multipleNames;
+		const target = ["f2"];
+		const query = buildQuery(fp, resource.resourceType, fhirSchema);
+		const result = await testQuery(query, resource);
+		expect(result).toEqual(target);
+	});
+
+	// exists(<criterion>) on a singleton (non-array) input must also apply its
+	// criterion. `code` is a single CodeableConcept that is present, so a
+	// criterion-ignoring implementation would return true regardless.
+	test("exists on a singleton with criteria", async () => {
+		const fp = "code.exists(text='Systolic')";
+		const resource = {resourceType: "Observation", status: "final", code: {text: "Systolic"}};
+		const target = true;
+		const query = buildQuery(fp, resource.resourceType, fhirSchema);
+		const result = await testQuery(query, resource);
+		expect(result).toEqual(target);
+	});
+
+	test("exists on a singleton with criteria matching nothing", async () => {
+		const fp = "code.exists(text='Diastolic')";
+		const resource = {resourceType: "Observation", status: "final", code: {text: "Systolic"}};
+		const target = false;
+		const query = buildQuery(fp, resource.resourceType, fhirSchema);
+		const result = await testQuery(query, resource);
+		expect(result).toEqual(target);
+	});
+
+	// Multi-segment input + compound criterion (the reported scenario): the
+	// where()/exists() chain must walk `code.coding` and apply `system AND code`.
+	test("exists with a compound criterion that matches", async () => {
+		const fp = "code.coding.exists(system='http://loinc.org' and code='8480-6')";
+		const resource = {resourceType: "Observation", status: "final",
+			code: {coding: [{system: "http://loinc.org", code: "8480-6"}]}};
+		const target = true;
+		const query = buildQuery(fp, resource.resourceType, fhirSchema);
+		const result = await testQuery(query, resource);
+		expect(result).toEqual(target);
+	});
+
+	test("exists with a compound criterion that excludes", async () => {
+		const fp = "code.coding.exists(system='http://loinc.org' and code='8480-6')";
+		const resource = {resourceType: "Observation", status: "final",
+			code: {coding: [{system: "http://loinc.org", code: "99999-9"}]}};
+		const target = false;
+		const query = buildQuery(fp, resource.resourceType, fhirSchema);
+		const result = await testQuery(query, resource);
+		expect(result).toEqual(target);
+	});
+
 	test("exists on a non-list", async () => {
 		const fp = "id.exists()";
 		const resource = multipleNames;
