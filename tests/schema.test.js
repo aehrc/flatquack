@@ -35,21 +35,21 @@ describe("fhirpath to duckdb sql schemas", () => {
 	test("string type", async () => {
 		const fp = "id";
 		const schema = buildSchemaSubset(fp, "Observation", fhirSchema);
-		const target = "{id: 'VARCHAR'}";
+		const target = `{ "id": 'VARCHAR' }`;
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));
 	});
 
 	test("integer type", async () => {
 		const fp = "valueInteger";
 		const schema = buildSchemaSubset(fp, "Observation", fhirSchema);
-		const target = "{valueInteger: 'INTEGER'}";
+		const target = `{ "valueInteger": 'INTEGER' }`;
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));
 	});
 
 	test("boolean type", async () => {
 		const fp = "valueBoolean";
 		const schema = buildSchemaSubset(fp, "Observation", fhirSchema);
-		const target = "{valueBoolean: 'BOOLEAN'}";
+		const target = `{ "valueBoolean": 'BOOLEAN' }`;
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));
 	});
 
@@ -57,7 +57,7 @@ describe("fhirpath to duckdb sql schemas", () => {
 		const decimalSchema = {"Custom.valueDecimal": {t: "decimal"}}
 		const fp = "valueDecimal";
 		const schema = buildSchemaSubset(fp, "Custom", decimalSchema);
-		const target = "{valueDecimal: 'DOUBLE'}";
+		const target = `{ "valueDecimal": 'DOUBLE' }`;
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));
 	});
 
@@ -65,49 +65,59 @@ describe("fhirpath to duckdb sql schemas", () => {
 		const customSchema = {"Custom": {t: "custom"}}
 		const fp = "custom";
 		const schema = buildSchemaSubset(fp, "Custom", customSchema);
-		const target = "{custom: 'JSON'}";
+		const target = `{ "custom": 'JSON' }`;
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));
 	});
 
 	test("struct", async () => {
 		const fp = "valueQuantity.value";
 		const schema = buildSchemaSubset(fp, "Observation", fhirSchema);
-		const target = "{valueQuantity: 'STRUCT(value DOUBLE)'}";
+		const target = `{ "valueQuantity": 'STRUCT("value" DOUBLE)' }`;
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));	
 	})
 
 	test("array", async () => {
 		const fp = "name.family";
 		const schema = buildSchemaSubset(fp, "Patient", fhirSchema);
-		const target = "{name: 'STRUCT(family VARCHAR)[]'}"
+		const target = `{ "name": 'STRUCT("family" VARCHAR)[]' }`
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));	
 	});
 
 	test("array of arrays", async () => {
 		const fp = "name.given";
 		const schema = buildSchemaSubset(fp, "Patient", fhirSchema);
-		const target = "{name: 'STRUCT(given VARCHAR[])[]'}"
+		const target = `{ "name": 'STRUCT("given" VARCHAR[])[]' }`
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));	
 	});
 
 	test("multiple paths should be at top level", async () => {
 		const fp = ["name.family", "active"]
 		const schema = buildSchemaSubset(fp, "Patient", fhirSchema);
-		const target = "{name: 'STRUCT(family VARCHAR)[]', active: 'BOOLEAN'}"
+		const target = `{ "name": 'STRUCT("family" VARCHAR)[]', "active": 'BOOLEAN' }`
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));	
 	});
 
 	test("overlapping paths should nest", async () => {
 		const fp = ["name.family", "name.given"]
 		const schema = buildSchemaSubset(fp, "Patient", fhirSchema);
-		const target = "{name: 'STRUCT(family VARCHAR, given VARCHAR[])[]'}"
+		const target = `{ "name": 'STRUCT("family" VARCHAR, "given" VARCHAR[])[]' }`
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));	
 	});
 
 	test("repeated paths should be included once", async () => {
 		const fp = ["name.family", "name.family"]
 		const schema = buildSchemaSubset(fp, "Patient", fhirSchema);
-		const target = "{name: 'STRUCT(family VARCHAR)[]'}"
+		const target = `{ "name": 'STRUCT("family" VARCHAR)[]' }`
+		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));
+	});
+
+	test("reserved-word field names are double-quoted", async () => {
+		// `end` (from FHIR Period) is a DuckDB reserved word; emitting it
+		// unquoted produces an unparseable STRUCT type spec (issue #10).
+		const customSchema = {"Custom.period": {t: "Period"}, "Period.end": {t: "dateTime"}};
+		const fp = "period.end";
+		const schema = buildSchemaSubset(fp, "Custom", customSchema);
+		const target = `{ "period": 'STRUCT("end" VARCHAR)' }`;
 		expect(schema.replace(/\s*/g, "")).toEqual(target.replace(/\s*/g, ""));
 	});
 
