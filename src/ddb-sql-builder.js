@@ -134,14 +134,17 @@ export function astToSql(node, inLambda, inputType={}) {
 					return {sql, outputType: {fhirType: "string", isArray: false}}
 				
 				case 'where':
+					// Compile the whole predicate chain (node.args[0]), not just its
+					// first segment — a multi-segment predicate (e.g. `coding.exists(...)`)
+					// must be walked end-to-end to yield a boolean.
 					if (inputType && inputType.isArray) {
-						sql = `list_filter(el -> ${flattenSql(astToSql(firstArg, true)).sql})`;
+						sql = `list_filter(el -> ${flattenSql(astToSql(node.args[0], true)).sql})`;
 						outputType = {fhirType: inputType.fhirType, isArray: true}
 					} else if (inputType.fhirType) {
-						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(firstArg, true)).sql}).slice(1)`;
+						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(node.args[0], true)).sql}).slice(1)`;
 						outputType = {fhirType: inputType.fhirType, isArray: false}
 					} else {
-						sql = flattenSql(astToSql(firstArg)).sql;			
+						sql = flattenSql(astToSql(node.args[0])).sql;
 						outputType = {fhirType: "boolean_expr", isArray: false}
 					}
 					return {sql, outputType}
@@ -153,9 +156,15 @@ export function astToSql(node, inLambda, inputType={}) {
 					return {sql, outputType: {isArray: false, fhirType: "boolean_expr"}}
 	
 				case 'exists':
+					// exists(criterion) === where(criterion).exists(): when a criterion
+					// is supplied, filter by it instead of by "element is present".
 					if (inputType.isArray) {
-						const sqlExpr = inputType.fhirType == "boolean_expr" ? " = true" : "IS NOT NULL";
-						sql = `list_filter(el -> el ${sqlExpr}).ifnull2([]).len() > 0`					
+						const predicate = node.args[0]
+							? flattenSql(astToSql(node.args[0], true)).sql
+							: `el ${inputType.fhirType == "boolean_expr" ? "= true" : "IS NOT NULL"}`;
+						sql = `list_filter(el -> ${predicate}).ifnull2([]).len() > 0`
+					} else if (node.args[0]) {
+						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(node.args[0], true)).sql}).ifnull2([]).len() > 0`;
 					} else {
 						sql = inputType.fhirType == "boolean_expr" ? "is_true()" : "is_not_null()";
 					}
