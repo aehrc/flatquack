@@ -55,7 +55,47 @@ describe("e2e tests", () => {
 			true, true
 		);
 
-		const result = await executeQuery(db, querySql);	
+		const result = await executeQuery(db, querySql);
+		expect(new Set(result)).toEqual(new Set(expected));
+	});
+
+	test("forEachOrNull with getReferenceKey() column binds on DuckDB 1.4.x (issue #18)", async () => {
+		// The getReferenceKey() column inside a forEachOrNull compiles to a
+		// list_filter(...) lambda nested inside the forEachOrNull's list_transform(...)
+		// lambda. When both lambdas use the same parameter name, DuckDB 1.4.x's binder
+		// fails with: Binder Error: Referenced column "el" not found in FROM clause!
+		const encounter = {
+			resourceType: "Encounter",
+			id: "enc1",
+			status: "finished",
+			participant: [{individual: {reference: "Practitioner/prac1"}}]
+		};
+		const encounterFile = path.join(import.meta.dir, "e2e-encounter.temp.json");
+		Bun.write(encounterFile, JSON.stringify([encounter]));
+
+		const viewDefinition = {
+			"resource": "Encounter",
+			"select": [
+				{"column": [{"name": "id", "path": "getResourceKey()"}]},
+				{
+					"forEachOrNull": "participant",
+					"column": [{
+						"name": "practitioner_id",
+						"path": "individual.getReferenceKey(Practitioner)"
+					}]
+				}
+			]
+		};
+
+		const expected = [{"id": "enc1", "practitioner_id": "prac1"}];
+		const querySql = templateToQuery(
+			viewDefinition, fhirSchema,
+			testQueryTemplate, [["test_file_path", encounterFile]],
+			true, true
+		);
+
+		const result = await executeQuery(db, querySql);
+		fs.unlinkSync(encounterFile);
 		expect(new Set(result)).toEqual(new Set(expected));
 	});
 });
