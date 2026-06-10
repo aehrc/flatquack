@@ -182,13 +182,21 @@ export function astToSql(node, inLambda, inputType={}) {
 
 				//non-standard
 				case '_splitPath':
+					// Use the function-call form `parse_path(el, '/')` rather than the
+					// method-call form `el.parse_path('/')` when operating on a lambda
+					// parameter. DuckDB 1.4.x's binder fails to resolve a lambda parameter
+					// used as a method-call receiver inside a list_filter predicate that is
+					// itself nested in another lambda (e.g. getReferenceKey() inside a
+					// forEach) — see issue #18. The function-call form binds correctly on
+					// both 1.4.x and 1.5.x. The non-lambda case stays method-chained so
+					// flattenSql can join it onto the preceding navigation segment.
 					return inputType && inputType.isArray
 						? {
-							sql: `list_transform(el -> el.parse_path('/')[${firstArg.value}])`,
+							sql: `list_transform(el -> parse_path(el, '/')[${firstArg.value}])`,
 							outputType: {isArray: true, fhirType: "string"}
 						}
 						: {
-							sql: `${inLambda ? "el." : ""}parse_path('/')[${firstArg.value}]`, 
+							sql: `parse_path(${inLambda ? "el, " : ""}'/')[${firstArg.value}]`,
 							outputType: {isArray: false, fhirType: "string"}
 						}
 
