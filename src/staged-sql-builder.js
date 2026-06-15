@@ -226,17 +226,26 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 
 	// A `forEach` over a field that a sibling `repeat` forces to JSON[] (the shared-field case):
 	// unnest the JSON list and consume each node through the same from_json typed bridge a repeat
-	// scope uses — no recursion, just one descent level.
-	function emitJsonEach(f, parentRel, carried, keyCols, ordName) {
-		const childKey = ordName ? [...keyCols, ordName] : keyCols;
-		const carryCols = [...childKey, ...carried];
+	// scope uses — no recursion, just one descent level. `forkOrd`, when set, carries the iteration
+	// ordinal forward as a recombination key (a fork below needs it); otherwise a private ordinal
+	// supplies this iteration's `%rowIndex` only.
+	function emitJsonEach(f, parentRel, carried, keyCols, forkOrd) {
+		// Mint an ordinal so `%rowIndex` is available even when no fork below needs it as a key —
+		// unnestFrom binds the 0-based `%rowIndex` SQL onto `f.childElem.rowIndexSql` from it.
+		const ordName = forkOrd || name("rn");
+		const childKey = forkOrd ? [...keyCols, ordName] : keyCols;
 		const from = unnestFrom(parentRel, f, ordName);
 		const structure = B.repeatStructure(f.node, f.childElem.seed);
 		const cast = `${castMacroFor(structure, f.childElem.seed)}(node)`;
 		const bridge = name("repb");
-		ctes.push(`${bridge} AS (\n  SELECT ${carryCols.length ? carryCols.join(", ") + ", " : ""}${cast} AS ${BRIDGE_VAR}\n  FROM ${from}\n)`);
-		// `%rowIndex` of this shared-field iteration is bound by unnestFrom (on the bridge element).
-		return emitScope(f.node, bridgeElem(f.childElem.seed), carried, childKey, bridge, false, null);
+		// Project the body element plus the iteration's `%rowIndex` value, so the bridge scope can
+		// bind `%rowIndex` to a column (the raw ordinal is out of scope past this CTE when private).
+		const rnCol = name("jern");
+		const carryCols = [...childKey, ...carried];
+		ctes.push(`${bridge} AS (\n  SELECT ${carryCols.length ? carryCols.join(", ") + ", " : ""}${f.childElem.rowIndexSql} AS ${rnCol}, ${cast} AS ${BRIDGE_VAR}\n  FROM ${from}\n)`);
+		const bodyElem = bridgeElem(f.childElem.seed);
+		bodyElem.rowIndexSql = rnCol;
+		return emitScope(f.node, bodyElem, carried, childKey, bridge, false, null);
 	}
 
 	// emitScope: builds a stage exposing keyCols + carried + this scope's columns, then
@@ -298,9 +307,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 				const f = realFanouts[0];
 				// A fork-key ordinal (`ord{depth}`, carried as a key column) doubles as this
 				// iteration's `%rowIndex` source; otherwise a private ordinal supplies it.
+				if (f.jsonMode) return emitJsonEach(f, relName, carriedAfter, keyCols, f.needsOrd ? `ord${keyCols.length}` : null);
 				const ordName = f.needsOrd ? `ord${keyCols.length}` : name("rn");
 				const childKey = f.needsOrd ? [...keyCols, ordName] : keyCols;
-				if (f.jsonMode) return emitJsonEach(f, relName, carriedAfter, keyCols, f.needsOrd ? ordName : null);
 				const from = unnestFrom(relName, f, ordName);
 				const childPrefix = schemaPrefix ? [...schemaPrefix, ...(f.node.forEach || f.node.forEachOrNull).split(".")] : null;
 				return emitScope(f.node, f.childElem, carriedAfter, childKey, from, false, childPrefix);

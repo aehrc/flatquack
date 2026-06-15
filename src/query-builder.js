@@ -10,13 +10,15 @@ import macros from "../templates/duck-macros.js";
 // re-enters `WITH RECURSIVE`; its body is evaluated typed through a from_json bridge instead.
 function applyForcedJson(tree, paths) {
 	(paths || []).forEach(pathStr => {
-		let level = tree, node = null;
+		let level = tree, node = null, matched = true;
 		for (const seg of pathStr.split(".")) {
 			node = level.find(n => n.value === seg);
-			if (!node) break;
+			if (!node) { matched = false; break; }
 			level = node.children;
 		}
-		if (node) { node.forceJson = true; node.children = []; }
+		// Only force-JSON when the FULL path resolved: a partial match leaves `node` pointing at a
+		// shallower ancestor, and truncating that would corrupt a typed sibling's read schema.
+		if (matched && node) { node.forceJson = true; node.children = []; }
 	});
 }
 
