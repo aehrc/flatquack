@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import {expect, test, describe, beforeAll, afterAll} from "bun:test"
 import {buildStagedQuery} from "../src/staged-sql-builder.js";
+import {validateVd} from "../src/view-parser.js";
 
 import {templateToQuery} from "../src/query-builder.js";
 import {stagedQueryTemplate, openMemoryDb, getColumns, executeQuery} from "./test-util.js";
@@ -47,6 +48,46 @@ describe("staged - unsupported directives", () => {
 			{forEach: "item", repeat: ["item"], column: [{name: "l", path: "linkId", type: "string"}]}
 		]};
 		expect(() => buildStagedQuery(view, fhirSchema, {})).toThrow(/repeat/);
+	});
+
+	test("%rowIndex is rejected with a clear, non-misleading error", () => {
+		const view = {resource: "Patient", select: [
+			{column: [{name: "idx", path: "%rowIndex", type: "integer"}]}
+		]};
+		// Must not suggest the (useless) `--var rowIndex=...` workaround; must name the feature.
+		expect(() => buildStagedQuery(view, fhirSchema, {})).toThrow(/rowIndex/);
+		expect(() => buildStagedQuery(view, fhirSchema, {})).not.toThrow(/--var/);
+	});
+});
+
+describe("staged - column name validation", () => {
+	test("duplicate column names across sibling scopes are rejected", () => {
+		const view = {resource: "Patient", select: [
+			{column: [{name: "x", path: "id", type: "id"}]},
+			{forEach: "name", column: [{name: "x", path: "family", type: "string"}]}
+		]};
+		expect(() => validateVd(view)).toThrow(/duplicate column name/i);
+	});
+
+	test("duplicate column name between a column and a unionAll branch is rejected", () => {
+		const view = {resource: "Patient", select: [
+			{column: [{name: "v", path: "id", type: "id"}]},
+			{unionAll: [
+				{column: [{name: "v", path: "gender", type: "code"}]},
+				{column: [{name: "v", path: "id", type: "id"}]}
+			]}
+		]};
+		expect(() => validateVd(view)).toThrow(/duplicate column name/i);
+	});
+
+	test("matching names across unionAll branches (the required case) are allowed", () => {
+		const view = {resource: "Patient", select: [
+			{unionAll: [
+				{column: [{name: "v", path: "gender", type: "code"}]},
+				{column: [{name: "v", path: "id", type: "id"}]}
+			]}
+		]};
+		expect(() => validateVd(view)).not.toThrow();
 	});
 });
 

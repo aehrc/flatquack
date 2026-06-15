@@ -64,6 +64,24 @@ export function validateVd(vd) {
 
 	//nested elements
 	validateElement(vd);
+
+	// Column names must be unique across the whole view (SQL-on-FHIR §column.name). The output
+	// projection collects every column in tree order, treating a transparent nested select as part
+	// of its parent and a unionAll as contributing its (name-matched) branches once — mirror that
+	// here so a name reused across sibling scopes is rejected up front. Without this, the staged
+	// emitter would emit two same-named columns into a CTE; DuckDB silently keeps the first and the
+	// other column's values are dropped with no error.
+	function collectColumnNames(node) {
+		const names = [];
+		(node.column || []).forEach(c => names.push(c.name));
+		(node.select || []).forEach(child => names.push(...collectColumnNames(child)));
+		if (node.unionAll) names.push(...collectColumnNames(node.unionAll[0]));
+		return names;
+	}
+	const names = collectColumnNames(vd);
+	const duplicate = names.find((n, i) => names.indexOf(n) !== i);
+	if (duplicate)
+		throw new Error(`duplicate column name '${duplicate}' - column names must be unique across a view`);
 }
 
 // Build a single resource-rooted FHIRPath expression that nests every navigation a

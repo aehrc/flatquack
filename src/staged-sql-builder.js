@@ -34,10 +34,17 @@ function collectScope(node) {
 }
 
 // Does this scope (or any descendant) contain a fork (>=2 fan-out children)?
+// Memoised per node: emitScope queries it at every level (once globally, then per fan-out for
+// `needsOrd`), so without the cache the recursive walk is re-run on overlapping subtrees. Keyed
+// on the VD node objects, which are unique per build, so a module-level WeakMap is collision-free.
+const forkCache = new WeakMap();
 function subtreeHasFork(node) {
+	if (forkCache.has(node)) return forkCache.get(node);
 	const {fanouts} = collectScope(node);
-	if (fanouts.length >= 2) return true;
-	return fanouts.some(f => f.type === "each" && subtreeHasFork(f.node));
+	const result = fanouts.length >= 2
+		|| fanouts.some(f => f.type === "each" && subtreeHasFork(f.node));
+	forkCache.set(node, result);
+	return result;
 }
 
 // VD column names in document (tree) order — the output projection contract.
@@ -68,27 +75,28 @@ export function makeBuilder(schema, vars) {
 		return {name: col.name, expr, sql: `${expr} AS ${col.name}`};
 	}
 
-	// The element produced by iterating `pathStr` from `elem`.
-	function childElemOf(pathStr, elem) {
-		const {type} = compilePath(pathStr, elem);
+	// Prepare a fan-out over `pathStr` from `elem` in a single compile pass, returning both the
+	// array SQL to UNNEST and the child scope element. (childElemOf and arrayize used to compile
+	// the same path twice.)
+	//   - arrSql: wrap a non-list path as a 1-element list so it can be UNNESTed. Use the SQL-level
+	//     array-ness (outputType), not the FHIR cardinality of the final step: navigation through an
+	//     array flattens to a list (e.g. `contact.name`), and an indexer like `telecom[0]` yields a
+	//     scalar even though `telecom` is a list.
+	//   - childElem: the element produced by iterating `pathStr`.
+	function prepareFanout(pathStr, elem) {
+		const {sql, outputType, type} = compilePath(pathStr, elem);
 		return {
-			ref: "node",
-			inLambda: true,
-			seed: type.schemaPath,
-			inputType: {fhirType: type.fhirType, isArray: false, schemaPath: type.schemaPath}
+			arrSql: outputType.isArray ? sql : `as_list(${sql})`,
+			childElem: {
+				ref: "node",
+				inLambda: true,
+				seed: type.schemaPath,
+				inputType: {fhirType: type.fhirType, isArray: false, schemaPath: type.schemaPath}
+			}
 		};
 	}
 
-	// Wrap a non-list path as a 1-element list so it can be UNNESTed. Use the SQL-level
-	// array-ness (outputType), not the FHIR cardinality of the final step: navigation
-	// through an array flattens to a list (e.g. `contact.name`), and an indexer like
-	// `telecom[0]` yields a scalar even though `telecom` is a list.
-	function arrayize(pathStr, elem) {
-		const {sql, outputType} = compilePath(pathStr, elem);
-		return outputType.isArray ? sql : `as_list(${sql})`;
-	}
-
-	return {compilePath, compileColumn, childElemOf, arrayize};
+	return {compilePath, compileColumn, prepareFanout};
 }
 
 // --- main entry -----------------------------------------------------------
@@ -150,11 +158,12 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		// materialise the array for each fan-out child as a named column in this stage
 		realFanouts.forEach(f => {
 			const path = f.node.forEach || f.node.forEachOrNull;
+			const {arrSql, childElem} = B.prepareFanout(path, elem);
 			f.arrCol = name("a") + "_arr";
 			f.orNull = !!f.node.forEachOrNull;
-			f.childElem = B.childElemOf(path, elem);
+			f.childElem = childElem;
 			f.needsOrd = subtreeHasFork(f.node);
-			stageSelect.push(`${B.arrayize(path, elem)} AS ${f.arrCol}`);
+			stageSelect.push(`${arrSql} AS ${f.arrCol}`);
 		});
 		// materialise arrays needed by unionAll branches
 		unionFanouts.forEach(f => {
@@ -210,17 +219,21 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		return {rel: forkName, cols: [...carriedAfter, ...branches.flatMap(b => b.cols)]};
 	}
 
+	// A FROM clause that unnests a materialised array column of `rel`, binding each element to a
+	// `node` column under `alias`. `orNull` chooses LEFT JOIN ... ON TRUE (keep parent rows with an
+	// empty array) vs an inner comma-join; `ordName`, when set, adds WITH ORDINALITY as a second
+	// bound column. Single source of this clause for both chains/forks and unionAll branches.
+	function unnestClause(rel, arrCol, alias, orNull, ordName) {
+		const tuple = ordName ? `${alias}(node, ${ordName})` : `${alias}(node)`;
+		const ordinality = ordName ? " WITH ORDINALITY" : "";
+		return orNull
+			? `${rel}\n  LEFT JOIN UNNEST(${rel}.${arrCol})${ordinality} AS ${tuple} ON TRUE`
+			: `${rel}, UNNEST(${rel}.${arrCol})${ordinality} AS ${tuple}`;
+	}
+
 	// build a FROM clause that unnests a materialised array column of `relName`
 	function unnestFrom(relName, f, ordName) {
-		const a = `_u${++counter}`;
-		if (ordName) {
-			return f.orNull
-				? `${relName}\n  LEFT JOIN UNNEST(${relName}.${f.arrCol}) WITH ORDINALITY AS ${a}(node, ${ordName}) ON TRUE`
-				: `${relName}, UNNEST(${relName}.${f.arrCol}) WITH ORDINALITY AS ${a}(node, ${ordName})`;
-		}
-		return f.orNull
-			? `${relName}\n  LEFT JOIN UNNEST(${relName}.${f.arrCol}) AS ${a}(node) ON TRUE`
-			: `${relName}, UNNEST(${relName}.${f.arrCol}) AS ${a}(node)`;
+		return unnestClause(relName, f.arrCol, `_u${++counter}`, f.orNull, ordName);
 	}
 
 	// --- unionAll ----------------------------------------------------------
@@ -231,9 +244,10 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			if (b.unionAll) return {nested: prepUnion(b.unionAll, elem, stageSelect)};
 			if (b.forEach || b.forEachOrNull) {
 				const path = b.forEach || b.forEachOrNull;
+				const {arrSql, childElem} = B.prepareFanout(path, elem);
 				const arrCol = name("u") + "_arr";
-				stageSelect.push(`${B.arrayize(path, elem)} AS ${arrCol}`);
-				return {node: b, arrCol, orNull: !!b.forEachOrNull, childElem: B.childElemOf(path, elem)};
+				stageSelect.push(`${arrSql} AS ${arrCol}`);
+				return {node: b, arrCol, orNull: !!b.forEachOrNull, childElem};
 			}
 			// columns only (no iteration): materialise each column expr in the stage
 			// (the scope element is available there but not carried downstream)
@@ -254,9 +268,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			entries.forEach(e => {
 				if (e.nested) { collect(e.nested, srcRel); return; }
 				if (e.arrCol) {
-					const join = e.orNull
-						? `${srcRel}\n  LEFT JOIN UNNEST(${srcRel}.${e.arrCol}) AS _b${++counter}(node) ON TRUE`
-						: `${srcRel}, UNNEST(${srcRel}.${e.arrCol}) AS _b${++counter}(node)`;
+					const join = unnestClause(srcRel, e.arrCol, `_b${++counter}`, e.orNull, null);
 					const colProjs = (e.node.column || []).map(c => B.compileColumn(c, e.childElem));
 					cols = cols || colProjs.map(c => c.name);
 					const sel = [...keyCols, ...carried, ...colProjs.map(c => c.sql)];
