@@ -1,7 +1,6 @@
 import fs from "fs";
 import path from "path";
 import {expect, test, describe, beforeAll, afterAll} from "bun:test"
-import {buildStagedQuery} from "../src/staged-sql-builder.js";
 import {validateVd} from "../src/view-parser.js";
 
 import {templateToQuery} from "../src/query-builder.js";
@@ -10,11 +9,6 @@ import fhirSchema from "../schemas/fhir-schema-r4.json";
 
 const verbose = process.env.VERBOSE === "1";
 const testDirectory = path.join(import.meta.dir, "./spec-tests/");
-
-// The staged emitter does not yet implement `repeat` (a later migration stage). Exclude that
-// suite; everything else — including `row_index` (`%rowIndex` for forEach/forEachOrNull/unionAll,
-// this stage) — is the official reference harness, unchanged.
-const EXCLUDE = /^(repeat)\./;
 
 let db;
 
@@ -26,7 +20,6 @@ let testFiles = [];
 
 files.forEach( f => {
 	if (/\.temp\.json|skip$|^\./.test(f)) return;
-	if (EXCLUDE.test(f)) return;
 	const testGroup = JSON.parse(fs.readFileSync(path.join(testDirectory, f)))
 	if (!testGroup.skip)
 		testFiles.push({fileName: f, testGroup});
@@ -42,15 +35,6 @@ const buildStaged = (view, resourceFile, rootKey="natural") => templateToQuery(
 	view, fhirSchema, stagedQueryTemplate,
 	[["test_file_path", resourceFile]], verbose, true, null, null, rootKey
 );
-
-describe("staged - unsupported directives", () => {
-	test("repeat is rejected with a clear error", () => {
-		const view = {resource: "QuestionnaireResponse", select: [
-			{forEach: "item", repeat: ["item"], column: [{name: "l", path: "linkId", type: "string"}]}
-		]};
-		expect(() => buildStagedQuery(view, fhirSchema, {})).toThrow(/repeat/);
-	});
-});
 
 describe("staged - column name validation", () => {
 	test("duplicate column names across sibling scopes are rejected", () => {

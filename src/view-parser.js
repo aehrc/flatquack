@@ -96,6 +96,13 @@ export function validateVd(vd) {
 export function viewPaths(vd) {
 
 	function parseNode(node) {
+		// A `repeat` descends its listed paths recursively in JSON; the typed read schema needs
+		// only the seed fields present (the staged emitter forces them to JSON[]), not the body —
+		// the body re-enters typed via a from_json bridge. Surface the seed fields as nav leaves.
+		if (node.repeat) {
+			return `_nav(${node.repeat.join(", ")})`;
+		}
+
 		if (node.forEach || node.forEachOrNull) {
 			const rest = parseNode({...node, forEach: undefined, forEachOrNull: undefined});
 			return `${node.forEach || node.forEachOrNull}._nav(${rest})`;
