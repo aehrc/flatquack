@@ -70,13 +70,13 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 			return {sql, outputType: {fhirType: node.type.fhirType, isArray: false}};
 
 		// `%rowIndex`: the 0-based position within the nearest enclosing iteration, threaded as
-		// `rowIndexSql` (bound to the iteration ordinal minus 1 by an enclosing forEach/forEachOrNull,
-		// else "0" at the resource root / a non-iterating branch). A `null` binding means the scope
-		// cannot supply a position — a `%rowIndex` indexing a `repeat`'s own descent scope (Stage 4,
-		// unsupported); reject it rather than silently emit a constant.
+		// `rowIndexSql` (bound to the iteration ordinal minus 1 by an enclosing forEach/forEachOrNull;
+		// to a pre-order descent window by an enclosing `repeat`; else "0" at the resource root / a
+		// non-iterating branch). A `null` binding means the scope cannot supply a position — guard
+		// against silently emitting a constant if a scope ever reaches the leaf engine without one.
 		case 'rowIndex':
 			if (rowIndexSql == null)
-				throw new Error("%rowIndex referencing a repeat's own descent scope is not supported");
+				throw new Error("%rowIndex referencing a scope with no defined iteration position");
 			return {sql: rowIndexSql, outputType: {fhirType: "integer", isArray: false}};
 
 		//and, or, add, subtract, multiply

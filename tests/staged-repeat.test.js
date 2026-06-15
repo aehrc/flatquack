@@ -142,11 +142,12 @@ describe("staged - fork inside a repeat body", () => {
 	});
 });
 
-// `%rowIndex` indexing a repeat's OWN descent scope is Stage 4 (the recursive CTE has no
-// per-iteration ordinal). It must be rejected at build time, not silently bound to a constant 0.
-// `%rowIndex` for a forEach/forEachOrNull *inside* a repeat body is Stage 2 and keeps working
-// (covered by the choice-type fixtures' iteration); this only guards the own-scope case.
-describe("staged - %rowIndex over a repeat's own scope is rejected", () => {
+// `%rowIndex` indexing a repeat's OWN descent scope is Stage 4: assigned by a pre-order window over
+// the descent path (NOT silently bound to a constant 0, and no longer rejected). The end-to-end
+// numbering is exercised by row_index_repeat.json; here we only assert the build compiles and emits
+// the pre-order window. A `%rowIndex` referencing a repeat scope that the emitter does NOT enter
+// (no descent) would still be rejected by the leaf engine — that guard remains in ddb-sql-builder.
+describe("staged - %rowIndex over a repeat's own scope is a pre-order window", () => {
 	const riView = {
 		resource: "QuestionnaireResponse",
 		select: [
@@ -157,11 +158,12 @@ describe("staged - %rowIndex over a repeat's own scope is rejected", () => {
 			]}
 		]
 	};
-	test("throws rather than emitting a constant", () => {
-		expect(() => templateToQuery(
+	test("emits a row_number() pre-order window partitioned per resource", () => {
+		const sql = templateToQuery(
 			riView, fhirSchema, stagedQueryTemplate,
 			[["test_file_path", "/tmp/unused.json"]], verbose, true, null, null, "natural"
-		)).toThrow(/%rowIndex/);
+		);
+		expect(sql).toMatch(/row_number\(\) OVER \(PARTITION BY rid ORDER BY path\)/);
 	});
 });
 
