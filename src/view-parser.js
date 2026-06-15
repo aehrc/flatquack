@@ -67,40 +67,30 @@ export function validateVd(vd) {
 }
 
 // Build a single resource-rooted FHIRPath expression that nests every navigation a
-// ViewDefinition performs (forEach / forEachOrNull steps wrapping their column paths, and
+// ViewDefinition performs (each forEach / forEachOrNull step wrapping its column paths, and
 // unionAll branches). The staged emitter reads typed columns, so this expression — parsed by
-// `fhirpathToAst` and walked by `extractPathsFromAst` — supplies the read schema's path
-// coverage. It is schema coverage only: no flattening tables / join machinery is produced.
+// `fhirpathToAst` (which type-resolves child paths against their enclosing forEach element) and
+// walked by `extractPathsFromAst` — supplies the read schema's path coverage. It is schema
+// coverage only: no flattening tables / join machinery is produced.
+//
+// `_nav(...)` is an inert grouping wrapper: `extractPathsFromAst` recurses through any function's
+// args regardless of name, so it serves only to carry the type context down each forEach step.
 export function viewPaths(vd) {
 
-	function parseNode(node, isRoot, inUnion) {
+	function parseNode(node) {
 		if (node.forEach || node.forEachOrNull) {
-			const rest = parseNode({...node, forEach: undefined, forEachOrNull: undefined}, false, false);
-			const path = `${node.forEach || node.forEachOrNull}._nav(${rest})`;
-			return !inUnion ? `_nav('e', ${path})` : path;
+			const rest = parseNode({...node, forEach: undefined, forEachOrNull: undefined});
+			return `${node.forEach || node.forEachOrNull}._nav(${rest})`;
 		}
 
-		let output = [];
-		if (node.column) {
-			const columns = node.column.map( c => `_col('${c.name}', ${c.path||c.name})` );
-			output.push(inUnion ? `_nav(${columns})` : columns);
-		}
-
-		if (node.select) {
-			const path = node.select.map( n => parseNode(n, false, false) );
-			output.push(isRoot || inUnion ? `_nav(${path.join(", ")})` : path);
-		}
-
-		if (node.unionAll) {
-			const path = node.unionAll.map(n => parseNode(n, false, true));
-			const unionPath = `_nav(${path.join(", ")})`;
-			output.push(isRoot ? `_nav(${unionPath})` : unionPath);
-		}
-
-		return output.join(", ");
+		const parts = [];
+		if (node.column) parts.push(...node.column.map(c => c.path || c.name));
+		if (node.select) parts.push(...node.select.map(parseNode));
+		if (node.unionAll) parts.push(...node.unionAll.map(parseNode));
+		return `_nav(${parts.join(", ")})`;
 	}
 
-	return parseNode(vd, true);
+	return parseNode(vd);
 }
 
 export function extractPathsFromAst(node) {
