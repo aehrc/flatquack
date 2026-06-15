@@ -4,6 +4,24 @@ import {validateVd, viewPaths, extractPathsFromAst} from "./view-parser.js";
 import {buildStagedQuery} from "./staged-sql-builder.js";
 import macros from "../templates/duck-macros.js";
 
+// Force the schema tree nodes named by resource-rooted dot paths to read as raw JSON[]
+// (a repeat seed: "repeat wins" over any sibling navigation that would type the field). The
+// recursive FHIR type a repeat descends is not a finite STRUCT, so the seed stays raw JSON[] and
+// re-enters `WITH RECURSIVE`; its body is evaluated typed through a from_json bridge instead.
+function applyForcedJson(tree, paths) {
+	(paths || []).forEach(pathStr => {
+		let level = tree, node = null, matched = true;
+		for (const seg of pathStr.split(".")) {
+			node = level.find(n => n.value === seg);
+			if (!node) { matched = false; break; }
+			level = node.children;
+		}
+		// Only force-JSON when the FULL path resolved: a partial match leaves `node` pointing at a
+		// shallower ancestor, and truncating that would corrupt a typed sibling's read schema.
+		if (matched && node) { node.forceJson = true; node.children = []; }
+	});
+}
+
 export function buildQuery(vd, schema, filterByResourceType, verbose, vars, rootKey="natural") {
 	validateVd(vd);
 
@@ -29,6 +47,8 @@ export function buildQuery(vd, schema, filterByResourceType, verbose, vars, root
 	// need not otherwise reference; include its path in the typed read schema so the key binds.
 	const keyAsts = staged.resourceKeyAst ? [staged.resourceKeyAst] : [];
 	const schemaPaths = extractPathsFromAst({asts: [viewAst].concat(whereAsts).concat(keyAsts)});
+	// A repeat seed reachable through typed navigation must read as raw JSON[] ("repeat wins").
+	applyForcedJson(schemaPaths, staged.forcedJsonPaths);
 	const schemaSql = pathsToSchema(schemaPaths)
 	return {schemaSql, whereSql, staged}
 }
@@ -57,6 +77,8 @@ export function templateToQuery(vd, schema, template, args=[], verbose, filterBy
 		["fq_sql_macros", allMacros],
 		["fq_staged_src", queryParts.staged.srcSelect],
 		["fq_staged_tail", queryParts.staged.tail],
+		["fq_staged_with", queryParts.staged.withKeyword],
+		["fq_staged_macros", queryParts.staged.macros],
 		["fq_staged_src_materialized", queryParts.staged.srcMaterialized ? "MATERIALIZED " : ""]
 	]);
 

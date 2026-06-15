@@ -71,8 +71,12 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 
 		// `%rowIndex`: the 0-based position within the nearest enclosing iteration, threaded as
 		// `rowIndexSql` (bound to the iteration ordinal minus 1 by an enclosing forEach/forEachOrNull,
-		// else "0" at the resource root / a non-iterating branch).
+		// else "0" at the resource root / a non-iterating branch). A `null` binding means the scope
+		// cannot supply a position — a `%rowIndex` indexing a `repeat`'s own descent scope (Stage 4,
+		// unsupported); reject it rather than silently emit a constant.
 		case 'rowIndex':
+			if (rowIndexSql == null)
+				throw new Error("%rowIndex referencing a repeat's own descent scope is not supported");
 			return {sql: rowIndexSql, outputType: {fhirType: "integer", isArray: false}};
 
 		//and, or, add, subtract, multiply
@@ -254,25 +258,54 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 	}
 }
 
+// The scalar SQL type a leaf path node reads as. A non-primitive (uppercase) FHIR type, or a
+// node with no resolved type, falls back to raw JSON.
+function leafSqlType(node) {
+	if (node.fhirType == "decimal") return "DOUBLE";
+	if (["boolean", "integer"].indexOf(node.fhirType) > -1) return node.fhirType.toUpperCase();
+	if (node.fhirType && node.fhirType[0] != node.fhirType[0].toUpperCase()) return "VARCHAR";
+	return "JSON";
+}
+
 export function pathsToSchema(node, isInRoot=true) {
 	if (Array.isArray(node)) {
 		const schema = node.map(n => pathsToSchema(n, isInRoot)).join(", ");
-		return (isInRoot) ? `{ ${schema} }` : schema; 
+		return (isInRoot) ? `{ ${schema} }` : schema;
 	}
 
 	const arrayIndicator = node.isArray ? "[]" : "";
 	let sqlType;
-	if (!node.fhirType) console.log(`${JSON.stringify(node)} is of an unknown type`)
-	if (node.children.length) {
-		sqlType = `STRUCT(${node.children.map(c => pathsToSchema(c, false)).join(", ")})${arrayIndicator}`
-	} else if (node.fhirType == "decimal") {
-		sqlType = `DOUBLE${arrayIndicator}`;
-	} else if (["boolean", "integer"].indexOf(node.fhirType) > -1) {
-		sqlType = `${node.fhirType.toUpperCase()}${arrayIndicator}`;
-	} else if (node.fhirType && node.fhirType[0] != node.fhirType[0].toUpperCase()) {
-		sqlType = `VARCHAR${arrayIndicator}`;
-	} else {
+	// A repeat seed is read as a raw JSON list (a recursive FHIR type is not a finite STRUCT);
+	// it forces JSON regardless of any sibling navigation that would otherwise type it.
+	if (node.forceJson) {
 		sqlType = `JSON${arrayIndicator}`;
+	} else if (node.children.length) {
+		if (!node.fhirType) console.log(`${JSON.stringify(node)} is of an unknown type`)
+		sqlType = `STRUCT(${node.children.map(c => pathsToSchema(c, false)).join(", ")})${arrayIndicator}`
+	} else {
+		if (!node.fhirType) console.log(`${JSON.stringify(node)} is of an unknown type`)
+		sqlType = `${leafSqlType(node)}${arrayIndicator}`;
 	}
 	return isInRoot ? `${node.value}: '${sqlType}'` : `${node.value} ${sqlType}`
+};
+
+// Render a path tree as a `from_json` structure (the JSON-object form `from_json` accepts:
+// objects are `{"f":T,...}`, arrays of objects are `[{...}]`, scalar/JSON leaves are quoted
+// type strings like `"VARCHAR"`, `"VARCHAR[]"`, `"JSON[]"`). Truncated/childless complex
+// nodes (notably nested-repeat seeds) become `"JSON[]"`, matching the truncate-at-repeat-seed
+// schema rule and keeping those subtrees raw so they can re-enter `WITH RECURSIVE`.
+export function pathsToJsonStruct(node, isInRoot=true) {
+	const objOf = nodes => `{${nodes.map(n => `${JSON.stringify(n.value)}:${pathsToJsonStruct(n, false)}`).join(",")}}`;
+	if (Array.isArray(node)) return objOf(node);
+
+	const arr = node.isArray;
+	let typeStr;
+	if (!node.forceJson && node.children && node.children.length) {
+		const inner = objOf(node.children);
+		typeStr = arr ? `[${inner}]` : inner;
+	} else {
+		const scalar = node.forceJson ? "JSON" : leafSqlType(node);
+		typeStr = JSON.stringify(`${scalar}${arr ? "[]" : ""}`);
+	}
+	return isInRoot ? `{${JSON.stringify(node.value)}:${typeStr}}` : typeStr;
 };
