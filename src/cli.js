@@ -56,14 +56,11 @@ function showVersion() {
 	process.exit(0);
 }
 
-async function runQuery(sql) {
+async function withMemoryConnection(fn) {
 	const instance = await DuckDBInstance.create(":memory:");
-	const conn = await instance.connect();
-	const startTime = performance.now();
 	try {
-		await conn.run(sql);
-		const duration = Math.round(performance.now() - startTime);
-		console.log("Completed in " + duration + " ms");
+		const conn = await instance.connect();
+		await fn(conn);
 	} catch (err) {
 		console.warn(err);
 	} finally {
@@ -71,17 +68,20 @@ async function runQuery(sql) {
 	}
 }
 
+async function runQuery(sql) {
+	await withMemoryConnection(async (conn) => {
+		const startTime = performance.now();
+		await conn.run(sql);
+		const duration = Math.round(performance.now() - startTime);
+		console.log("Completed in " + duration + " ms");
+	});
+}
+
 async function exploreQuery(sql) {
-	const instance = await DuckDBInstance.create(":memory:");
-	const conn = await instance.connect();
-	try {
+	await withMemoryConnection(async (conn) => {
 		const result = await conn.runAndReadAll(sql);
 		console.log(result.getRowObjectsJS());
-	} catch (err) {
-		console.warn(err);
-	} finally {
-		instance.closeSync();
-	}
+	});
 }
 
 function loadMacros(macroLocations) {

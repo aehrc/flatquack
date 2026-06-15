@@ -1,10 +1,9 @@
 import {expect, test, describe, beforeAll, afterAll} from "bun:test";
-import { DuckDBInstance } from "@duckdb/node-api";
+import {openMemoryDb} from "./test-util.js";
 import fs from "fs";
 import path from "path";
 
-let instance;
-let conn;
+let db;
 
 const anonymizeMacroSql = fs.readFileSync(
   path.join(import.meta.dir, "../templates/anonymize.sql"),
@@ -12,18 +11,15 @@ const anonymizeMacroSql = fs.readFileSync(
 );
 
 async function executeQuery(query) {
-  const result = await conn.runAndReadAll(query);
-  return result.getRowObjectsJS();
+  return db.all(query);
 }
 
 beforeAll(async () => {
-  instance = await DuckDBInstance.create(":memory:");
-  conn = await instance.connect();
-  await conn.run(anonymizeMacroSql);
+  db = await openMemoryDb(anonymizeMacroSql);
 });
 
 afterAll(async () => {
-  instance.closeSync();
+  await db.close();
 });
 
 describe("anon_is_usa - detect US country codes", () => {

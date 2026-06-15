@@ -26,21 +26,25 @@ class DuckDBConn {
 		return result.getRowObjectsJS();
 	}
 
+	async columns(sql) {
+		const result = await this._conn.runAndReadAll(sql);
+		return result.columnNames();
+	}
+
 	async close() {
 		this._instance.closeSync();
 	}
 }
 
-export async function openMemoryDb() {
+export async function openMemoryDb(macroSql = macros) {
 	const instance = await DuckDBInstance.create(":memory:");
 	const conn = await instance.connect();
-	await conn.run(macros);
+	await conn.run(macroSql);
 	return new DuckDBConn(instance, conn);
 }
 
 export async function getColumns(db, query) {
-	const result = await db._conn.runAndReadAll(query);
-	return result.columnNames();
+	return db.columns(query);
 }
 
 export async function executeQuery(db, query) {
