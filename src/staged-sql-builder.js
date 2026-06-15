@@ -65,40 +65,52 @@ function subtreeHasFork(node) {
 	return result;
 }
 
+// Does a scope reference `%rowIndex` in a column it binds itself? The candidate set is the scope's
+// own (direct + transparently-merged) columns and any columns-only `unionAll` branch (which
+// materialises into this stage); a nested forEach/repeat or an iterating union branch opens its own
+// scope and is excluded. `colHit(col)` decides whether a single column mentions `%rowIndex` — there
+// are two detectors (see below) sharing this one traversal so the "opens its own scope" rule lives
+// in a single place.
+function scopeMentionsRowIndex(node, colHit) {
+	const {columns, fanouts} = collectScope(node);
+	if (columns.some(colHit)) return true;
+	return fanouts.filter(f => f.type === "union")
+		.some(f => unionColsMentionRowIndex(f.node.unionAll, colHit));
+}
+function unionColsMentionRowIndex(branches, colHit) {
+	return branches.some(b => {
+		if (b.unionAll) return unionColsMentionRowIndex(b.unionAll, colHit);
+		if (b.forEach || b.forEachOrNull || b.repeat) return false; // opens its own scope
+		return (b.column || []).some(colHit);
+	});
+}
+
 // Raw-string `%rowIndex` detection, used ONLY for the structural look-ahead that forces a partition
 // key down a spine to a `%rowIndex` repeat (Stage 4). Over-approximation is safe here: a false
 // positive can only force an extra, harmless carried key, never alter a `%rowIndex`-free view (which
 // contains no `%rowIndex` token to match). The precise per-scope binding decision still parses the
-// resolved AST when the column is compiled, so this raw scan never affects which value is emitted.
+// resolved AST when the column is compiled (see `scopeUsesRowIndex`), so this raw scan never affects
+// which value is emitted.
 function pathMentionsRowIndex(p) {
 	return typeof p === "string" && /%rowIndex\b/.test(p);
 }
-function unionBranchesMentionRowIndex(branches) {
-	return branches.some(b => {
-		if (b.unionAll) return unionBranchesMentionRowIndex(b.unionAll);
-		if (b.forEach || b.forEachOrNull || b.repeat) return false; // opens its own scope
-		return (b.column || []).some(c => pathMentionsRowIndex(c.path || c.name));
-	});
-}
-// Does a `repeat`'s own scope (direct + transparently-merged columns, and columns-only `unionAll`
-// branches) reference `%rowIndex`? Mirrors the candidate set the scope actually compiles its
-// `%rowIndex`-binding columns against (a nested forEach/repeat/union-iterating branch opens its own
-// scope and is excluded).
-function repeatScopeUsesRowIndex(repeatNode) {
-	const {columns, fanouts} = collectScope(repeatNode);
-	if (columns.some(c => pathMentionsRowIndex(c.path || c.name))) return true;
-	return fanouts.filter(f => f.type === "union")
-		.some(f => unionBranchesMentionRowIndex(f.node.unionAll));
-}
+const colMentionsRowIndex = c => pathMentionsRowIndex(c.path || c.name);
+const repeatScopeUsesRowIndex = repeatNode => scopeMentionsRowIndex(repeatNode, colMentionsRowIndex);
+
 // Does any `repeat` anywhere in `node`'s subtree have a body that references `%rowIndex`? A
 // `%rowIndex` repeat assigns its index by a window partitioned by its enclosing-scope instance, so
 // the resource key (`rid`) and any enclosing iterating step's ordinal must be minted on the spine
-// down to that repeat. Forces the root key and carried ordinals even in a fork-free view.
+// down to that repeat. Forces the root key and carried ordinals even in a fork-free view. Memoised
+// like `subtreeHasFork` — emitScope queries it per fan-out as it descends overlapping subtrees.
+const repeatRowIndexCache = new WeakMap();
 function subtreeHasRepeatUsingRowIndex(node) {
 	if (!node || typeof node !== "object") return false;
-	if (node.repeat && repeatScopeUsesRowIndex(node)) return true;
-	return (node.select || []).some(subtreeHasRepeatUsingRowIndex)
+	if (repeatRowIndexCache.has(node)) return repeatRowIndexCache.get(node);
+	const result = (node.repeat && repeatScopeUsesRowIndex(node))
+		|| (node.select || []).some(subtreeHasRepeatUsingRowIndex)
 		|| (node.unionAll || []).some(subtreeHasRepeatUsingRowIndex);
+	repeatRowIndexCache.set(node, result);
+	return result;
 }
 
 // Deep-walk a FHIRPath AST (nested arrays of segments, each with possible `args`/`type` sub-trees)
@@ -242,27 +254,12 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		return {ref: BRIDGE_VAR, inLambda: true, seed, inputType: {fhirType: "BackboneElement", isArray: false, schemaPath: seed}, rowIndexSql: null};
 	}
 
-	// Does `pathExpr`, evaluated against `elem`, reference `%rowIndex`? Parse it (cheap at build
-	// time) and look for the contextual segment, rather than pattern-matching the raw string.
-	const pathUsesRowIndex = (pathExpr, elem) =>
-		astHasRowIndex(fhirpathToAst(pathExpr, elem.seed, schema, vars));
-	// Does any column bound against THIS scope's element reference `%rowIndex`? Candidates are the
-	// scope's own (direct + transparently merged) columns and any columns-only `unionAll` branch
-	// (which materialises into this stage). A nested forEach/repeat/iterating-union branch opens its
-	// own scope and is excluded — it is handled when ITS parent makes the same decision.
-	function scopeUsesRowIndex(node, elem) {
-		const {columns, fanouts} = collectScope(node);
-		if (columns.some(c => pathUsesRowIndex(c.path || c.name, elem))) return true;
-		return fanouts.filter(f => f.type === "union")
-			.some(f => unionColsOnlyUseRowIndex(f.node.unionAll, elem));
-	}
-	function unionColsOnlyUseRowIndex(branches, elem) {
-		return branches.some(b => {
-			if (b.unionAll) return unionColsOnlyUseRowIndex(b.unionAll, elem);
-			if (b.forEach || b.forEachOrNull || b.repeat) return false; // opens its own scope
-			return (b.column || []).some(c => pathUsesRowIndex(c.path || c.name, elem));
-		});
-	}
+	// Does a scope bound against `elem` reference `%rowIndex`? The precise binding decision: parse
+	// each candidate column (cheap at build time) and look for the contextual segment, rather than
+	// pattern-matching the raw string. Reuses the shared `scopeMentionsRowIndex` traversal (same
+	// "opens its own scope" rule as the raw look-ahead) with an AST-based per-column predicate.
+	const scopeUsesRowIndex = (node, elem) =>
+		scopeMentionsRowIndex(node, c => astHasRowIndex(fhirpathToAst(c.path || c.name, elem.seed, schema, vars)));
 
 	// Prepare a repeat fan-out: validate its paths, resolve the descent element type, and
 	// materialise the seed array into the owning stage's projection.
