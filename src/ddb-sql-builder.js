@@ -71,8 +71,12 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 
 		// `%rowIndex`: the 0-based position within the nearest enclosing iteration, threaded as
 		// `rowIndexSql` (bound to the iteration ordinal minus 1 by an enclosing forEach/forEachOrNull,
-		// else "0" at the resource root / a non-iterating branch).
+		// else "0" at the resource root / a non-iterating branch). A `null` binding means the scope
+		// cannot supply a position — a `%rowIndex` indexing a `repeat`'s own descent scope (Stage 4,
+		// unsupported); reject it rather than silently emit a constant.
 		case 'rowIndex':
+			if (rowIndexSql == null)
+				throw new Error("%rowIndex referencing a repeat's own descent scope is not supported");
 			return {sql: rowIndexSql, outputType: {fhirType: "integer", isArray: false}};
 
 		//and, or, add, subtract, multiply

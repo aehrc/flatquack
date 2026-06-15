@@ -181,8 +181,12 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	const srcMaterialized = viewHasFork && rootKeyMode === "uuid";
 
 	// The typed element produced by a from_json bridge over a JSON node column (bound as BRIDGE_VAR).
+	// `rowIndexSql: null` — a repeat's own descent scope has no positional ordinal (the recursive CTE
+	// has no per-iteration index; `%rowIndex` over a repeat's own scope is Stage 4), so a `%rowIndex`
+	// leaf compiled directly against this element is rejected rather than silently bound to a constant.
+	// A forEach/forEachOrNull *inside* a repeat body rebinds `rowIndexSql` to its real ordinal.
 	function bridgeElem(seed) {
-		return {ref: BRIDGE_VAR, inLambda: true, seed, inputType: {fhirType: "BackboneElement", isArray: false, schemaPath: seed}, rowIndexSql: "0"};
+		return {ref: BRIDGE_VAR, inLambda: true, seed, inputType: {fhirType: "BackboneElement", isArray: false, schemaPath: seed}, rowIndexSql: null};
 	}
 
 	// Prepare a repeat fan-out: validate its paths, resolve the descent element type, and
@@ -207,9 +211,24 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		const carryProj = (rel) => carryCols.map(c => `${rel}.${c}`);
 		const lead = (cols) => cols.length ? cols.join(", ") + ", " : "";
 
+		// A repeat body that forks (>=2 fan-out children below) needs a per-node identity: the rCTE
+		// otherwise keys every descended node on the carried key columns only (constant per resource
+		// for a CHAIN repeat, the parent fork key for a FORK branch), so the body's fork branches would
+		// recombine via `JOIN USING(keyCols)` and cross-product across ALL nodes of the resource. When
+		// so, carry an integer descent `path` (the per-level `WITH ORDINALITY` ordinals from the seed to
+		// a node) through both legs, then assign a deterministic pre-order index at the bridge
+		// (`ORDER BY path`: `[1] < [1,1] < [1,2] < [2]`). The index is unique per visited node and
+		// survives the fork joins as an extra key column. (This is the same descent key Stage 4 binds
+		// for `%rowIndex` over a repeat's own scope; here it is purely a fork-recombination key.)
+		const needNodeKey = subtreeHasFork(f.node);
+
 		const repName = name("rep");
-		const seedLeg = `SELECT ${lead(carryProj(parentRel))}_s.node AS node\n    FROM ${parentRel}, UNNEST(${parentRel}.${f.seedCol}) AS _s(node)`;
-		const recLeg = `SELECT ${lead(carryProj(repName))}_r.node\n    FROM ${repName}, UNNEST(${jsonFold(f.listedPaths, `${repName}.node`)}) AS _r(node)`;
+		const seedPath = needNodeKey ? `[ord]::BIGINT[] AS path, ` : "";
+		const recPath = needNodeKey ? `list_append(${repName}.path, ord), ` : "";
+		const seedOrd = needNodeKey ? ` WITH ORDINALITY AS _s(node, ord)` : ` AS _s(node)`;
+		const recOrd = needNodeKey ? ` WITH ORDINALITY AS _r(node, ord)` : ` AS _r(node)`;
+		const seedLeg = `SELECT ${lead(carryProj(parentRel))}${seedPath}_s.node AS node\n    FROM ${parentRel}, UNNEST(${parentRel}.${f.seedCol})${seedOrd}`;
+		const recLeg = `SELECT ${lead(carryProj(repName))}${recPath}_r.node\n    FROM ${repName}, UNNEST(${jsonFold(f.listedPaths, `${repName}.node`)})${recOrd}`;
 		ctes.push(`${repName} AS (\n    ${seedLeg}\n    UNION ALL\n    ${recLeg}\n  )`);
 
 		// The descent visits a single canonical element type; convert each visited JSON node to a
@@ -217,11 +236,23 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		const structure = B.repeatStructure(f.node, f.childElem.seed);
 		const cast = `${castMacroFor(structure, f.childElem.seed)}(node)`;
 		const bridge = name("repb");
-		ctes.push(`${bridge} AS (\n  SELECT ${lead(carryCols)}${cast} AS ${BRIDGE_VAR}\n  FROM ${repName}\n)`);
+		let bodyKeyCols = keyCols;
+		if (needNodeKey) {
+			// `ORDER BY path` is a total, deterministic order within the partition (paths are unique per
+			// node), so the index is reproducible across every reference to the bridge — no MATERIALIZED
+			// needed. `keyCols` always includes the resource key here (a body fork forces a root fork key).
+			const nodeKey = `nord${keyCols.length}`;
+			const part = keyCols.length ? `PARTITION BY ${keyCols.join(", ")} ` : "";
+			const rn = `(row_number() OVER (${part}ORDER BY path) - 1)::INTEGER AS ${nodeKey}`;
+			ctes.push(`${bridge} AS (\n  SELECT ${lead(carryCols)}${rn}, ${cast} AS ${BRIDGE_VAR}\n  FROM ${repName}\n)`);
+			bodyKeyCols = [...keyCols, nodeKey];
+		} else {
+			ctes.push(`${bridge} AS (\n  SELECT ${lead(carryCols)}${cast} AS ${BRIDGE_VAR}\n  FROM ${repName}\n)`);
+		}
 
 		// The body of a repeat is evaluated typed (its element is the from_json `el`); nested
 		// repeat seeds arrive as `el.<field>` JSON[] and re-enter `WITH RECURSIVE`.
-		return emitScope(f.node, bridgeElem(f.childElem.seed), carried, keyCols, bridge, false, null);
+		return emitScope(f.node, bridgeElem(f.childElem.seed), carried, bodyKeyCols, bridge, false, null);
 	}
 
 	// A `forEach` over a field that a sibling `repeat` forces to JSON[] (the shared-field case):
