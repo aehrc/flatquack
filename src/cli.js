@@ -6,7 +6,7 @@ import {Glob} from "bun";
 import {parseArgs} from "util";
 import {templateToQuery} from "./query-builder.js";
 import fhirSchema from "../schemas/fhir-schema-r4.json";
-import duckdb from "duckdb";
+import { DuckDBInstance } from "@duckdb/node-api";
 import {format} from "sql-formatter";
 
 // Read package.json for version info
@@ -56,26 +56,31 @@ function showVersion() {
 	process.exit(0);
 }
 
-function runQuery(sql) {
-	const db = new duckdb.Database(":memory:");
-	const startTime = performance.now()
-	db.run(sql, (err, result) => {
-		if (err) console.warn(err);
-		const duration = Math.round(performance.now() - startTime)
+async function withMemoryConnection(fn) {
+	const instance = await DuckDBInstance.create(":memory:");
+	try {
+		const conn = await instance.connect();
+		await fn(conn);
+	} catch (err) {
+		console.warn(err);
+	} finally {
+		instance.closeSync();
+	}
+}
+
+async function runQuery(sql) {
+	await withMemoryConnection(async (conn) => {
+		const startTime = performance.now();
+		await conn.run(sql);
+		const duration = Math.round(performance.now() - startTime);
 		console.log("Completed in " + duration + " ms");
-		db.close();
 	});
 }
 
-function exploreQuery(sql) {
-	const db = new duckdb.Database(":memory:");
-	db.all(sql, (err, result) => {
-		if (err) {
-			console.warn(err);
-		} else {
-			console.log(result)
-		}
-		db.close();
+async function exploreQuery(sql) {
+	await withMemoryConnection(async (conn) => {
+		const result = await conn.runAndReadAll(sql);
+		console.log(result.getRowObjectsJS());
 	});
 }
 
@@ -221,10 +226,10 @@ for (const file of glob.scanSync(args.values["view-path"],{onlyFiles:true})) {
 		fs.writeFileSync(outputPath, formattedQuery);
 	} else if (args.values["mode"] == "run") {
 		console.log("*** running", inputPath, "***");
-		runQuery(formattedQuery);
+		await runQuery(formattedQuery);
 	} else if (args.values["mode"] == "explore") {
 		console.log("*** exploring", inputPath, "***");
-		exploreQuery(formattedQuery);
+		await exploreQuery(formattedQuery);
 	} else { //preview mode
 		console.log("*** compiling", inputPath, "***");
 		console.log(formattedQuery)
