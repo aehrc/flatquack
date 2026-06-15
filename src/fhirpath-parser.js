@@ -201,12 +201,12 @@ function simplifyFhirPath(node, type = null, schema = {}, vars = {}) {
 		case 'ExternalConstant':
 			const varName = node.children[0].terminalNodeText[0].replace(/`/g, '');
 
-			// `%rowIndex` is a SQL-on-FHIR built-in (a per-row ordinal supplied by the engine,
-			// not a user-defined constant). The staged backend does not implement it yet, so
-			// reject it explicitly rather than falling through to the generic "define it with
-			// --var" hint below — a constant `--var` cannot supply a per-row index.
+			// `%rowIndex` is a SQL-on-FHIR built-in: the 0-based position of an element within the
+			// collection its enclosing operator iterates, supplied by the engine per iteration (not a
+			// user-defined `--var`). Emit a dedicated segment the staged emitter resolves to the
+			// per-iteration ordinal; do NOT route it through the `vars` lookup below.
 			if (varName === "rowIndex")
-				throw new Error("`%rowIndex` is not supported by the staged backend yet");
+				return [{ segmentType: "rowIndex", type: { fhirType: "integer", isArray: false } }];
 
 			const varValue = vars[varName];
 

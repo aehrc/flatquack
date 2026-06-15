@@ -60,9 +60,12 @@ function columnOrder(node) {
 
 export function makeBuilder(schema, vars) {
 
+	// `elem.rowIndexSql` is the SQL the current scope binds `%rowIndex` to: the per-iteration
+	// ordinal of the enclosing forEach/forEachOrNull (0-based), or "0" at the resource root / a
+	// non-iterating scope. Threaded into the leaf engine so a `%rowIndex` leaf resolves to it.
 	function compilePath(pathStr, elem) {
 		const ast = fhirpathToAst(pathStr, elem.seed, schema, vars);
-		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el");
+		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el", elem.rowIndexSql || "0");
 		return {sql: out.sql, outputType: out.outputType, type: ast.type};
 	}
 
@@ -70,7 +73,7 @@ export function makeBuilder(schema, vars) {
 		const pathExpr = col.path || col.name;
 		const fpStr = `_col${col.collection ? "_collection" : ""}('${col.name}', ${pathExpr})`;
 		const ast = fhirpathToAst(fpStr, elem.seed, schema, vars);
-		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el");
+		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el", elem.rowIndexSql || "0");
 		const expr = out.sql.replace(new RegExp(`^'${col.name}':\\s*`), "");
 		return {name: col.name, expr, sql: `${expr} AS ${col.name}`};
 	}
@@ -185,9 +188,12 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			// CHAIN
 			if (realFanouts.length === 1) {
 				const f = realFanouts[0];
-				const ordName = f.needsOrd ? `ord${keyCols.length}` : null;
-				const childKey = ordName ? [...keyCols, ordName] : keyCols;
+				// A fork-key ordinal (`ord{depth}`, carried as a key column) doubles as this
+				// iteration's `%rowIndex` source; otherwise a private `rn{n}` ordinal supplies it.
+				const ordName = f.needsOrd ? `ord${keyCols.length}` : `rn${++counter}`;
+				const childKey = f.needsOrd ? [...keyCols, ordName] : keyCols;
 				const from = unnestFrom(relName, f, ordName);
+				bindRowIndex(f, ordName);
 				return emitScope(f.node, f.childElem, carriedAfter, childKey, from, false);
 			}
 			// sole unionAll
@@ -197,7 +203,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		// FORK
 		const branches = [];
 		realFanouts.forEach(f => {
-			const from = unnestFrom(relName, f, null);
+			const ordName = `rn${++counter}`;
+			const from = unnestFrom(relName, f, ordName);
+			bindRowIndex(f, ordName);
 			const br = emitScope(f.node, f.childElem, [], keyCols, from, false);
 			branches.push({rel: br.rel, cols: br.cols, kind: f.orNull ? "LEFT" : "INNER"});
 		});
@@ -229,6 +237,17 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		return orNull
 			? `${rel}\n  LEFT JOIN UNNEST(${rel}.${arrCol})${ordinality} AS ${tuple} ON TRUE`
 			: `${rel}, UNNEST(${rel}.${arrCol})${ordinality} AS ${tuple}`;
+	}
+
+	// Bind this fan-out's `%rowIndex` for the child scope: the 1-based UNNEST ordinal `ordName`
+	// minus 1 (0-based, per SoF). For a `forEachOrNull` whose collection is empty, the LEFT JOIN
+	// supplies one row whose ordinal is NULL — the official fixture wants `%rowIndex = 0` there (the
+	// position of the single produced row), so coalesce the missing ordinal to 1 before subtracting.
+	// Resolved in the child stage, where the ordinal column is in scope. Cast to INTEGER: `WITH
+	// ORDINALITY` yields a BIGINT, but `%rowIndex` is a FHIR `integer`.
+	function bindRowIndex(f, ordName) {
+		const ord = f.orNull ? `COALESCE(${ordName}, 1)` : ordName;
+		f.childElem.rowIndexSql = `CAST(${ord} - 1 AS INTEGER)`;
 	}
 
 	// build a FROM clause that unnests a materialised array column of `relName`
@@ -268,7 +287,11 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			entries.forEach(e => {
 				if (e.nested) { collect(e.nested, srcRel); return; }
 				if (e.arrCol) {
-					const join = unnestClause(srcRel, e.arrCol, `_b${++counter}`, e.orNull, null);
+					// Each iterating unionAll branch gets its own `%rowIndex` ordinal (resets per
+					// branch), exactly like a forEach/forEachOrNull elsewhere.
+					const ordName = `rn${++counter}`;
+					const join = unnestClause(srcRel, e.arrCol, `_b${++counter}`, e.orNull, ordName);
+					bindRowIndex(e, ordName);
 					const colProjs = (e.node.column || []).map(c => B.compileColumn(c, e.childElem));
 					cols = cols || colProjs.map(c => c.name);
 					const sel = [...keyCols, ...carried, ...colProjs.map(c => c.sql)];
