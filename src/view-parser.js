@@ -64,67 +64,51 @@ export function validateVd(vd) {
 
 	//nested elements
 	validateElement(vd);
+
+	// Column names must be unique across the whole view (SQL-on-FHIR §column.name). The output
+	// projection collects every column in tree order, treating a transparent nested select as part
+	// of its parent and a unionAll as contributing its (name-matched) branches once — mirror that
+	// here so a name reused across sibling scopes is rejected up front. Without this, the staged
+	// emitter would emit two same-named columns into a CTE; DuckDB silently keeps the first and the
+	// other column's values are dropped with no error.
+	function collectColumnNames(node) {
+		const names = [];
+		(node.column || []).forEach(c => names.push(c.name));
+		(node.select || []).forEach(child => names.push(...collectColumnNames(child)));
+		if (node.unionAll) names.push(...collectColumnNames(node.unionAll[0]));
+		return names;
+	}
+	const names = collectColumnNames(vd);
+	const duplicate = names.find((n, i) => names.indexOf(n) !== i);
+	if (duplicate)
+		throw new Error(`duplicate column name '${duplicate}' - column names must be unique across a view`);
 }
 
-export function parseVd(vd, skipValidation) {
-	let tableIndex = 0;
-	let tables = [];
+// Build a single resource-rooted FHIRPath expression that nests every navigation a
+// ViewDefinition performs (each forEach / forEachOrNull step wrapping its column paths, and
+// unionAll branches). The staged emitter reads typed columns, so this expression — parsed by
+// `fhirpathToAst` (which type-resolves child paths against their enclosing forEach element) and
+// walked by `extractPathsFromAst` — supplies the read schema's path coverage. It is schema
+// coverage only: no flattening tables / join machinery is produced.
+//
+// `_nav(...)` is an inert grouping wrapper: `extractPathsFromAst` recurses through any function's
+// args regardless of name, so it serves only to carry the type context down each forEach step.
+export function viewPaths(vd) {
 
-	function addField(fieldName, parent) {
-		if (!tables.find(t => t.fieldName == fieldName && t.type == "field" && t.parent == parent)) {
-			tables.push({type: "field", parent, fieldName});
-		}
-	}
-
-	function updateTable(name, allowNull) {
-		tables.find(t => t.name == name).allowNull = allowNull;
-	}
-
-	function addTable(type, parent, allowNull) {
-		tableIndex++;
-		const name = [type[0], tableIndex].join("_");
-		tables.push({type, parent, name, allowNull});
-		return name;
-	}
-
-	function parseNode(node, isRoot, inUnion, parentTable) {
+	function parseNode(node) {
 		if (node.forEach || node.forEachOrNull) {
-			const eachTable = !inUnion ? addTable(node.forEach ? "each" : "nullEach", parentTable, !!node.forEachOrNull) : parentTable;
-			if (inUnion && node.forEachOrNull) updateTable(eachTable, true);
-			const rest = parseNode({...node, forEach: undefined, forEachOrNull: undefined}, false, false, eachTable);
-			const path = `${node.forEach || node.forEachOrNull}.${node.forEachOrNull ? "_forEachOrNull" : "_forEach"}(${rest})`;
-			return !inUnion ? `_col_collection('${eachTable}', ${path})` : path;
+			const rest = parseNode({...node, forEach: undefined, forEachOrNull: undefined});
+			return `${node.forEach || node.forEachOrNull}._nav(${rest})`;
 		}
 
-		let output = [];
-		if (node.column) {
-			node.column.forEach( c => addField(c.name, parentTable) );
-			const columns = node.column.map( c => `_col${c.collection ? "_collection" : ""}('${c.name}', ${c.path||c.name})` );
-			output.push(inUnion ? `_forEach(${columns})` : columns);
-		}
-
-		if (node.select) {
-			const path = node.select.map( n => parseNode(n, false, false, parentTable) );
-			// output.push(isRoot ? `_forEach(${path.join(", ")})` : path);
-			output.push(isRoot || inUnion ? `_forEach(${path.join(", ")})` : path);
-		}
-		
-		if (node.unionAll) {
-			const parentTableDefinition = tables.find(t => t.name == parentTable)
-			const unionTable = !inUnion ? addTable("union", parentTable, parentTableDefinition && parentTableDefinition.allowNull) : parentTable;
-			const path = node.unionAll.map(n => parseNode(n, false, true, unionTable));
-			const unionPath = inUnion
-				? `_unionAll(${path.join(", ")})`
-				: `_col_collection('${unionTable}', _unionAll(${path.join(", ")}))`;
-			output.push(isRoot ? `_forEach(${unionPath})` : unionPath);
-		}
-
-		return output.join(", ");
+		const parts = [];
+		if (node.column) parts.push(...node.column.map(c => c.path || c.name));
+		if (node.select) parts.push(...node.select.map(parseNode));
+		if (node.unionAll) parts.push(...node.unionAll.map(parseNode));
+		return `_nav(${parts.join(", ")})`;
 	}
 
-	if (!skipValidation) validateVd(vd);
-	const path = parseNode(vd, true);
-	return {path, tables}
+	return parseNode(vd);
 }
 
 export function extractPathsFromAst(node) {

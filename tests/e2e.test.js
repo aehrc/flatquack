@@ -3,7 +3,7 @@ import path from "path";
 import {expect, test, describe, beforeAll, afterAll} from "bun:test";
 
 import {templateToQuery} from "../src/query-builder.js";
-import {testQueryTemplate, openMemoryDb, executeQuery} from "./test-util.js";
+import {stagedQueryTemplate, openMemoryDb, executeQuery} from "./test-util.js";
 import fhirSchema from "../schemas/fhir-schema-r4.json";
 
 let db;
@@ -51,7 +51,7 @@ describe("e2e tests", () => {
 		const expected = [{"crpValue": 0.0006}];
 		const querySql = templateToQuery(
 			viewDefinition, fhirSchema, 
-			testQueryTemplate, [["test_file_path", resourceFile]], 
+			stagedQueryTemplate, [["test_file_path", resourceFile]],
 			true, true
 		);
 
