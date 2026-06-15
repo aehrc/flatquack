@@ -75,7 +75,6 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 		case 'rowIndex':
 			return {sql: rowIndexSql, outputType: {fhirType: "integer", isArray: false}};
 
-
 		//and, or, add, subtract, multiply
 		case 'components':
 			const components = node.args.map( c => {
@@ -231,7 +230,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 					
 					// Process additional parameters (skip the first arg which is the macro name)
 					const macroParams = node.args.slice(1).map(argNodes => {
-						const argAst = flattenSql(astToSql(argNodes, false, inputType));
+						const argAst = flattenSql(astToSql(argNodes, false, inputType, rootVar, rowIndexSql));
 						return argAst.sql;
 					}).join(', ');
 					
