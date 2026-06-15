@@ -109,10 +109,13 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	const rootKey = viewHasFork ? ["rid"] : [];
 
 	// The root `rid` is the recombination key for any root fork. In "natural" mode it is the
-	// resource key (`getResourceKey()` -> `id`), the semantically correct and deterministic
-	// identity (no blocking window). In "uuid" mode it is a synthesised per-resource `uuid()`
-	// that requires no id-uniqueness assumption, but whose volatility means `src` must be
-	// materialised so both fork branches observe the same value.
+	// resource key, sourced from `getResourceKey()` so that a future change to that function's
+	// definition propagates to the key automatically. NOTE: `getResourceKey()` currently
+	// resolves to the bare `id` (no `ResourceType/` prefix), so the natural key only
+	// disambiguates within a single resource type; mixed-type reads risk a cross-type id
+	// collision at a root fork (see issue #26). In "uuid" mode it is a synthesised per-resource
+	// `uuid()` that requires no id-uniqueness assumption, but whose volatility means `src` must
+	// be materialised so both fork branches observe the same value.
 	const rootKeyExpr = rootKeyMode === "uuid"
 		? "uuid()"
 		: B.compilePath("getResourceKey()", {ref: null, inLambda: false, seed: vd.resource, inputType: {}}).sql;
