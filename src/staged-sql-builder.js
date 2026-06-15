@@ -65,7 +65,7 @@ export function makeBuilder(schema, vars) {
 	// non-iterating scope. Threaded into the leaf engine so a `%rowIndex` leaf resolves to it.
 	function compilePath(pathStr, elem) {
 		const ast = fhirpathToAst(pathStr, elem.seed, schema, vars);
-		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el", elem.rowIndexSql || "0");
+		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el", elem.rowIndexSql);
 		return {sql: out.sql, outputType: out.outputType, type: ast.type};
 	}
 
@@ -73,7 +73,7 @@ export function makeBuilder(schema, vars) {
 		const pathExpr = col.path || col.name;
 		const fpStr = `_col${col.collection ? "_collection" : ""}('${col.name}', ${pathExpr})`;
 		const ast = fhirpathToAst(fpStr, elem.seed, schema, vars);
-		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el", elem.rowIndexSql || "0");
+		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el", elem.rowIndexSql);
 		const expr = out.sql.replace(new RegExp(`^'${col.name}':\\s*`), "");
 		return {name: col.name, expr, sql: `${expr} AS ${col.name}`};
 	}
@@ -189,11 +189,10 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			if (realFanouts.length === 1) {
 				const f = realFanouts[0];
 				// A fork-key ordinal (`ord{depth}`, carried as a key column) doubles as this
-				// iteration's `%rowIndex` source; otherwise a private `rn{n}` ordinal supplies it.
-				const ordName = f.needsOrd ? `ord${keyCols.length}` : `rn${++counter}`;
+				// iteration's `%rowIndex` source; otherwise a private ordinal supplies it.
+				const ordName = f.needsOrd ? `ord${keyCols.length}` : name("rn");
 				const childKey = f.needsOrd ? [...keyCols, ordName] : keyCols;
 				const from = unnestFrom(relName, f, ordName);
-				bindRowIndex(f, ordName);
 				return emitScope(f.node, f.childElem, carriedAfter, childKey, from, false);
 			}
 			// sole unionAll
@@ -203,9 +202,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		// FORK
 		const branches = [];
 		realFanouts.forEach(f => {
-			const ordName = `rn${++counter}`;
-			const from = unnestFrom(relName, f, ordName);
-			bindRowIndex(f, ordName);
+			const from = unnestFrom(relName, f, name("rn"));
 			const br = emitScope(f.node, f.childElem, [], keyCols, from, false);
 			branches.push({rel: br.rel, cols: br.cols, kind: f.orNull ? "LEFT" : "INNER"});
 		});
@@ -250,8 +247,11 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		f.childElem.rowIndexSql = `CAST(${ord} - 1 AS INTEGER)`;
 	}
 
-	// build a FROM clause that unnests a materialised array column of `relName`
+	// Build a FROM clause that unnests a materialised array column of `relName` with `WITH
+	// ORDINALITY`, binding the ordinal as `ordName`, and bind the child scope's `%rowIndex` to it.
+	// Single source for chain, fork, and unionAll fan-outs.
 	function unnestFrom(relName, f, ordName) {
+		bindRowIndex(f, ordName);
 		return unnestClause(relName, f.arrCol, `_u${++counter}`, f.orNull, ordName);
 	}
 
@@ -289,9 +289,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 				if (e.arrCol) {
 					// Each iterating unionAll branch gets its own `%rowIndex` ordinal (resets per
 					// branch), exactly like a forEach/forEachOrNull elsewhere.
-					const ordName = `rn${++counter}`;
-					const join = unnestClause(srcRel, e.arrCol, `_b${++counter}`, e.orNull, ordName);
-					bindRowIndex(e, ordName);
+					const join = unnestFrom(srcRel, e, name("rn"));
 					const colProjs = (e.node.column || []).map(c => B.compileColumn(c, e.childElem));
 					cols = cols || colProjs.map(c => c.name);
 					const sel = [...keyCols, ...carried, ...colProjs.map(c => c.sql)];
