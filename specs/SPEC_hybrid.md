@@ -429,31 +429,35 @@ For a `repeat` that is one of **≥2** fan-out siblings, switch that scope to FO
 (§5 repeat): carry the fork key + a descent path through the `WITH RECURSIVE`, and
 join the repeat's scope to its siblings on the fork key.
 
-## 11. `%rowNumber` (positional index for forEach / repeat)
+## 11. `%rowIndex` (positional index for forEach / repeat)
 
-`%rowNumber` is the **1-based positional index of an element within the collection
+`%rowIndex` is the **0-based positional index of an element within the collection
 its operator iterates, scoped to that operator's parent instance** — *not* a global
 `ROW_NUMBER() OVER` over the output (SoF is order-agnostic; the index is structural,
 computed at the unnest/descent step, so it survives `preserve_insertion_order=false`).
 
-The hybrid is already positioned for this: `%rowNumber` **is** the
+The hybrid is already positioned for this: `%rowIndex` **is** the
 `generate_subscripts`/`WITH ORDINALITY` ordinal it mints for fork keys (§4) — just
-surfaced as a column value instead of (or alongside) being used in a key.
+surfaced as a column value (minus 1, since the ordinal is 1-based) instead of (or
+alongside) being used in a key.
 
 ### forEach / forEachOrNull
-The element's ordinal, available in **either** mode at zero extra cost:
+The element's ordinal, available in **either** mode at zero extra cost. The ordinal is
+**1-based**, so `%rowIndex = ord - 1`:
 
 ```sql
 -- CHAIN mode (staged column UNNEST): add WITH ORDINALITY
-FROM {parent}, UNNEST({parent}.arr) WITH ORDINALITY AS t(node, rn)        -- rn = %rowNumber
+FROM {parent}, UNNEST({parent}.arr) WITH ORDINALITY AS t(node, ord)       -- %rowIndex = ord - 1
 
--- FORK / unnest-in-SELECT mode: generate_subscripts zips positionally with unnest
-SELECT generate_subscripts(arr, 1) AS rn, unnest(arr) AS node FROM {parent}
+-- FORK / unnest-in-SELECT mode: generate_subscripts zips positionally with unnest (already 1-based)
+SELECT generate_subscripts(arr, 1) AS ord, unnest(arr) AS node FROM {parent}
 ```
 
-`rn` is `1,2,3…` **per parent row** (it resets automatically — each driving row's
-`arr` starts at 1). For `forEachOrNull`'s empty→NULL row, guard it:
-`CASE WHEN node IS NULL THEN NULL ELSE rn END`. Identical on `JSON[]` and `STRUCT[]`.
+`ord` is `1,2,3…` **per parent row** (it resets automatically — each driving row's
+`arr` starts at 1), so `%rowIndex` is `0,1,2…`. For `forEachOrNull`'s empty→NULL row,
+`%rowIndex` is **0**: a `LEFT JOIN UNNEST` yields no ordinal (`NULL`) for the empty
+collection, so coalesce before subtracting — `COALESCE(ord, 1) - 1` = `0`. Identical on
+`JSON[]` and `STRUCT[]`.
 
 ### repeat
 A `repeat` has no single parent collection, so the index is assigned **at the repeat
@@ -464,24 +468,25 @@ subscripts the scope already carries, §5 repeat). Two rules make it correct and
    scope is recombined with any sibling — then carry the scalar through the join.
    Computing `ROW_NUMBER()` on the *final flattened output* is wrong: a sibling
    cross-product would multiply the rows and inflate the index.
-2. **Partition by the repeat's parent-scope instance**, order by its path:
+2. **Partition by the repeat's parent-scope instance**, order by its path
+   (`ROW_NUMBER()` is 1-based, so `%rowIndex = rn - 1`):
 
    ```sql
-   ROW_NUMBER() OVER (PARTITION BY {parent-scope key} ORDER BY path) AS rn
+   ROW_NUMBER() OVER (PARTITION BY {parent-scope key} ORDER BY path) - 1 AS rn
    ```
    - **root** repeat → parent scope is the resource → `PARTITION BY rid`
    - **nested** repeat → parent scope is the enclosing iterating node → partition by
      that scope's key `(rid, ord₁…ordₖ)`.
 
-   **Use the enclosing scope's own scalar `%rowNumber` as the partition surrogate.**
+   **Use the enclosing scope's own scalar `%rowIndex` as the partition surrogate.**
    A repeat-inside-repeat keys the inner index by `(rid, outer_rn)` — so nested
    repeats *chain* their indices and you never `PARTITION BY` a `LIST`:
    ```sql
-   o_idx AS (   -- outer repeat: rn per resource; also each ancestor's scalar id
-     SELECT …, ROW_NUMBER() OVER (PARTITION BY rid ORDER BY opath) AS outer_rn FROM o),
+   o_idx AS (   -- outer repeat: rn per resource (0-based); also each ancestor's scalar id
+     SELECT …, ROW_NUMBER() OVER (PARTITION BY rid ORDER BY opath) - 1 AS outer_rn FROM o),
    …
    -- inner repeat, carrying outer_rn; its index resets per ancestor:
-   SELECT …, ROW_NUMBER() OVER (PARTITION BY rid, outer_rn ORDER BY ipath) AS inner_rn FROM i
+   SELECT …, ROW_NUMBER() OVER (PARTITION BY rid, outer_rn ORDER BY ipath) - 1 AS inner_rn FROM i
    ```
 
 Order by the **int list** path, never a string path (`'1.2.1'` mis-orders at ≥10
@@ -508,7 +513,7 @@ the index.
 | `unionAll`            | `UNION ALL` of branch pipelines                       | branches keyed by fork key; `JOIN USING(key)`             |
 | `where` / `resource`  | `WHERE BOOL/resourceType` on the stage                | same                                                      |
 | key (`rid`,`ord_i`)   | **none** (no key in a chain)                          | `rid` at `src`; `ord_i` via `generate_subscripts`/`WITH ORDINALITY` on the spine |
-| `%rowNumber` (§11)    | forEach: `WITH ORDINALITY`/`generate_subscripts` ordinal; repeat: `ROW_NUMBER() OVER (PARTITION BY parent-scope key ORDER BY path)` | same (assign at the operator's scope, carry the scalar through joins) |
+| `%rowIndex` (§11)     | forEach: `WITH ORDINALITY`/`generate_subscripts` ordinal `- 1` (0-based); repeat: `ROW_NUMBER() OVER (PARTITION BY parent-scope key ORDER BY path) - 1` | same (assign at the operator's scope, carry the scalar through joins) |
 
 ---
 

@@ -11,9 +11,10 @@ import fhirSchema from "../schemas/fhir-schema-r4.json";
 const verbose = process.env.VERBOSE === "1";
 const testDirectory = path.join(import.meta.dir, "./spec-tests/");
 
-// The staged emitter does not yet implement `repeat` or `%rowIndex` (later migration
-// stages). Exclude those suites; everything else is the official reference harness, unchanged.
-const EXCLUDE = /^(repeat|row_index)\./;
+// The staged emitter does not yet implement `repeat` (a later migration stage). Exclude that
+// suite; everything else — including `row_index` (`%rowIndex` for forEach/forEachOrNull/unionAll,
+// this stage) — is the official reference harness, unchanged.
+const EXCLUDE = /^(repeat)\./;
 
 let db;
 
@@ -48,15 +49,6 @@ describe("staged - unsupported directives", () => {
 			{forEach: "item", repeat: ["item"], column: [{name: "l", path: "linkId", type: "string"}]}
 		]};
 		expect(() => buildStagedQuery(view, fhirSchema, {})).toThrow(/repeat/);
-	});
-
-	test("%rowIndex is rejected with a clear, non-misleading error", () => {
-		const view = {resource: "Patient", select: [
-			{column: [{name: "idx", path: "%rowIndex", type: "integer"}]}
-		]};
-		// Must not suggest the (useless) `--var rowIndex=...` workaround; must name the feature.
-		expect(() => buildStagedQuery(view, fhirSchema, {})).toThrow(/rowIndex/);
-		expect(() => buildStagedQuery(view, fhirSchema, {})).not.toThrow(/--var/);
 	});
 });
 

@@ -1,4 +1,8 @@
-export function astToSql(node, inLambda, inputType={}, rootVar="el") {
+// `rowIndexSql` carries the SQL for the current `%rowIndex` — the 0-based position within the
+// nearest enclosing iteration. It defaults to "0" (no enclosing iteration: resource root, or a
+// non-iterating projection branch). A `forEach`/`forEachOrNull` stage rebinds it to its
+// per-iteration ordinal minus 1; threaded unchanged through every nested leaf expression.
+export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql="0") {
 
 	function flattenSql(querySegments) {
 		if (!querySegments) return;
@@ -24,7 +28,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 	if (Array.isArray(node)) {
 		let prevOutputType = inputType;
 		const outputSql = node.map(n => {
-			const query = astToSql(n, inLambda, prevOutputType, rootVar);
+			const query = astToSql(n, inLambda, prevOutputType, rootVar, rowIndexSql);
 			//only treat first element of a navigation array as in lambda (prefixed with 'el')
 			if (inLambda) inLambda = false; 
 			if (query) prevOutputType = query.outputType;
@@ -42,7 +46,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 		case 'expr':
 		case 'paren':
 			const children = Array.isArray(node.children) ? node.children : [node.children];
-			const query = flattenSql( astToSql(children, inLambda, inputType, rootVar) );
+			const query = flattenSql( astToSql(children, inLambda, inputType, rootVar, rowIndexSql) );
 			return {
 				sql: node.segmentType == "paren" ? `(${query.sql})` : query.sql, 
 				outputType: query.outputType
@@ -64,11 +68,17 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 		case 'literal':
 			sql = node.type.fhirType != "dateTime" ? node.value : `(TIMESTAMP '${node.value.replace("T", " ")}')`
 			return {sql, outputType: {fhirType: node.type.fhirType, isArray: false}};
-		
+
+		// `%rowIndex`: the 0-based position within the nearest enclosing iteration, threaded as
+		// `rowIndexSql` (bound to the iteration ordinal minus 1 by an enclosing forEach/forEachOrNull,
+		// else "0" at the resource root / a non-iterating branch).
+		case 'rowIndex':
+			return {sql: rowIndexSql, outputType: {fhirType: "integer", isArray: false}};
+
 		//and, or, add, subtract, multiply
 		case 'components':
 			const components = node.args.map( c => {
-				return flattenSql( astToSql(c, inLambda, {}, rootVar) );
+				return flattenSql( astToSql(c, inLambda, {}, rootVar, rowIndexSql) );
 			});
 			sql = components.map(c => c.sql).join(` ${node.operator} `);
 			outputType = {fhirType: node.type.fhirType == "number" ? "number" : "boolean_expr", isArray: false}
@@ -76,9 +86,9 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 
 		//equality, inequality
 		case 'comparison':
-			let leftQuery = astToSql(node.args[0], inLambda, inputType, rootVar);
+			let leftQuery = astToSql(node.args[0], inLambda, inputType, rootVar, rowIndexSql);
 			let leftIsArray = leftQuery.at(-1).outputType.isArray
-			let rightQuery = astToSql(node.args[1], inLambda, inputType, rootVar);
+			let rightQuery = astToSql(node.args[1], inLambda, inputType, rootVar, rowIndexSql);
 			let rightIsArray = rightQuery.at(-1).outputType.isArray;
 			if (rightIsArray && !leftIsArray) {
 				[rightQuery, leftQuery] = [leftQuery, rightQuery];
@@ -116,13 +126,13 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				
 				case 'where':
 					if (inputType && inputType.isArray) {
-						sql = `list_filter(el -> ${flattenSql(astToSql(firstArg, true, {}, "el")).sql})`;
+						sql = `list_filter(el -> ${flattenSql(astToSql(firstArg, true, {}, "el", rowIndexSql)).sql})`;
 						outputType = {fhirType: inputType.fhirType, isArray: true}
 					} else if (inputType.fhirType) {
-						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(firstArg, true, {}, "el")).sql}).slice(1)`;
+						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(firstArg, true, {}, "el", rowIndexSql)).sql}).slice(1)`;
 						outputType = {fhirType: inputType.fhirType, isArray: false}
 					} else {
-						sql = flattenSql(astToSql(firstArg, undefined, {}, rootVar)).sql;
+						sql = flattenSql(astToSql(firstArg, undefined, {}, rootVar, rowIndexSql)).sql;
 						outputType = {fhirType: "boolean_expr", isArray: false}
 					}
 					return {sql, outputType}
@@ -169,7 +179,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 				case '_col_collection':
 					const colName = firstArg.value;
 					const colValue = node.args[1].at(-1);
-					let colValueSql = flattenSql(astToSql(node.args[1], inLambda, inputType, rootVar));
+					let colValueSql = flattenSql(astToSql(node.args[1], inLambda, inputType, rootVar, rowIndexSql));
 					
 					// This validation can only really be run at runtime since a collection that happens
 					// to have one value is treated as a non-collection and doesn't need the collection tag. 
@@ -220,7 +230,7 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el") {
 					
 					// Process additional parameters (skip the first arg which is the macro name)
 					const macroParams = node.args.slice(1).map(argNodes => {
-						const argAst = flattenSql(astToSql(argNodes, false, inputType));
+						const argAst = flattenSql(astToSql(argNodes, false, inputType, rootVar, rowIndexSql));
 						return argAst.sql;
 					}).join(', ');
 					
