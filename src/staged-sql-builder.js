@@ -14,6 +14,13 @@ import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf} fro
 // engine compiles against it unchanged. The binding mode oscillates: typed scopes read
 // `read_json_auto` columns / `node`; a `repeat` scope reads `el = from_json(node)`.
 
+// The column a repeat's from_json bridge binds its typed element to. Deliberately NOT `el`: the
+// typed leaf engine names its internal `list_transform`/`list_filter` lambda parameter `el`, so a
+// repeat-scope column whose path navigates through an array (e.g. `answer.value.ofType(string)`)
+// would otherwise shadow the bridge element with the lambda element and bind the wrong struct. A
+// distinct bridge name keeps the two separate; it is both the CTE column alias and the leaf root-var.
+const BRIDGE_VAR = "el_r";
+
 // --- tree helpers ---------------------------------------------------------
 
 // Does the ViewDefinition contain any `repeat`? (forces a leading `WITH RECURSIVE`).
@@ -173,13 +180,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	// once per resource and all branches join on the same key.
 	const srcMaterialized = viewHasFork && rootKeyMode === "uuid";
 
-	// The typed element produced by a from_json bridge over a JSON node column. The bridge column
-	// is bound as `el_r`, NOT `el`: the typed leaf engine names its internal `list_transform`/
-	// `list_filter` lambda parameter `el`, so a repeat-scope column whose path navigates through an
-	// array (e.g. `answer.value.ofType(string)`) would otherwise shadow the bridge element with the
-	// lambda element and bind the wrong struct. A distinct bridge name keeps the two separate.
+	// The typed element produced by a from_json bridge over a JSON node column (bound as BRIDGE_VAR).
 	function bridgeElem(seed) {
-		return {ref: "el_r", inLambda: true, seed, inputType: {fhirType: "BackboneElement", isArray: false, schemaPath: seed}, rowIndexSql: "0"};
+		return {ref: BRIDGE_VAR, inLambda: true, seed, inputType: {fhirType: "BackboneElement", isArray: false, schemaPath: seed}, rowIndexSql: "0"};
 	}
 
 	// Prepare a repeat fan-out: validate its paths, resolve the descent element type, and
@@ -214,7 +217,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		const structure = B.repeatStructure(f.node, f.childElem.seed);
 		const cast = `${castMacroFor(structure, f.childElem.seed)}(node)`;
 		const bridge = name("repb");
-		ctes.push(`${bridge} AS (\n  SELECT ${lead(carryCols)}${cast} AS el_r\n  FROM ${repName}\n)`);
+		ctes.push(`${bridge} AS (\n  SELECT ${lead(carryCols)}${cast} AS ${BRIDGE_VAR}\n  FROM ${repName}\n)`);
 
 		// The body of a repeat is evaluated typed (its element is the from_json `el`); nested
 		// repeat seeds arrive as `el.<field>` JSON[] and re-enter `WITH RECURSIVE`.
@@ -231,7 +234,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		const structure = B.repeatStructure(f.node, f.childElem.seed);
 		const cast = `${castMacroFor(structure, f.childElem.seed)}(node)`;
 		const bridge = name("repb");
-		ctes.push(`${bridge} AS (\n  SELECT ${carryCols.length ? carryCols.join(", ") + ", " : ""}${cast} AS el_r\n  FROM ${from}\n)`);
+		ctes.push(`${bridge} AS (\n  SELECT ${carryCols.length ? carryCols.join(", ") + ", " : ""}${cast} AS ${BRIDGE_VAR}\n  FROM ${from}\n)`);
 		// `%rowIndex` of this shared-field iteration is bound by unnestFrom (on the bridge element).
 		return emitScope(f.node, bridgeElem(f.childElem.seed), carried, childKey, bridge, false, null);
 	}

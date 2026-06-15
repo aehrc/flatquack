@@ -291,15 +291,13 @@ export function pathsToSchema(node, isInRoot=true) {
 // nodes (notably nested-repeat seeds) become `"JSON[]"`, matching the truncate-at-repeat-seed
 // schema rule and keeping those subtrees raw so they can re-enter `WITH RECURSIVE`.
 export function pathsToJsonStruct(node, isInRoot=true) {
-	if (Array.isArray(node)) {
-		const fields = node.map(n => `${JSON.stringify(n.value)}:${pathsToJsonStruct(n, false)}`).join(",");
-		return `{${fields}}`;
-	}
+	const objOf = nodes => `{${nodes.map(n => `${JSON.stringify(n.value)}:${pathsToJsonStruct(n, false)}`).join(",")}}`;
+	if (Array.isArray(node)) return objOf(node);
 
 	const arr = node.isArray;
 	let typeStr;
 	if (!node.forceJson && node.children && node.children.length) {
-		const inner = `{${node.children.map(c => `${JSON.stringify(c.value)}:${pathsToJsonStruct(c, false)}`).join(",")}}`;
+		const inner = objOf(node.children);
 		typeStr = arr ? `[${inner}]` : inner;
 	} else {
 		const scalar = node.forceJson ? "JSON" : leafSqlType(node);

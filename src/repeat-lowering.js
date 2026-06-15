@@ -1,6 +1,6 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
 import {pathsToJsonStruct} from "./ddb-sql-builder.js";
-import {extractPathsFromAst} from "./view-parser.js";
+import {extractPathsFromAst, viewPaths} from "./view-parser.js";
 
 // Backend-agnostic `repeat` lowering helpers for the staged (`WITH RECURSIVE`) emitter. A
 // `repeat` descends ONLY its listed paths, recursively, excluding the seed; the descent runs in
@@ -41,38 +41,24 @@ export function typedSeed(paths, elem, B) {
 	paths.forEach(p => {
 		let resolved;
 		try { resolved = B.compilePath(p, elem); } catch { return; }
-		if (resolved.type && resolved.type.fhirType) parts.push(B.arrayize(p, elem));
+		if (!resolved.type || !resolved.type.fhirType) return;
+		// arrayize inline from the single compile result rather than recompiling via B.arrayize.
+		parts.push(resolved.outputType.isArray ? resolved.sql : `as_list(${resolved.sql})`);
 	});
 	if (!parts.length) return "[]::JSON[]";
 	return parts.length === 1 ? parts[0] : `list_concat(${parts.join(", ")})`;
 }
 
-// A resource-rooted FHIRPath expression covering a repeat body's navigations, rooted at the
-// repeat-scope element. Mirrors `viewPaths` but: it walks the body sans the `repeat` directive,
-// and a nested `repeat` inside the body surfaces ONLY its seed fields (each lands childless, hence
-// raw JSON[]) so the recursive subtype is not expanded into a finite STRUCT — that subtree stays
-// raw and re-enters `WITH RECURSIVE` under its own bridge.
-function repeatBodyPaths(node) {
-	if (node.repeat) {
-		// nested repeat: surface the seed fields only (childless navs -> JSON[])
-		return `_nav(${node.repeat.join(", ")})`;
-	}
-	if (node.forEach || node.forEachOrNull) {
-		const rest = repeatBodyPaths({...node, forEach: undefined, forEachOrNull: undefined});
-		return `${node.forEach || node.forEachOrNull}._nav(${rest})`;
-	}
-	const parts = [];
-	if (node.column) parts.push(...node.column.map(c => c.path || c.name));
-	if (node.select) parts.push(...node.select.map(repeatBodyPaths));
-	if (node.unionAll) parts.push(...node.unionAll.map(repeatBodyPaths));
-	return `_nav(${parts.join(", ")})`;
-}
-
 // The `from_json` structure for a repeat scope: `pathsToJsonStruct` over the scope's
-// column/forEach/where paths, rooted at the scope element, truncated at nested repeat seeds.
+// column/forEach/where paths, rooted at the scope element, truncated at nested repeat seeds. The
+// nav-path coverage reuses `viewPaths` (the same walker the read-schema derivation uses): a nested
+// `repeat` surfaces ONLY its seed fields (each lands childless, hence raw JSON[]) so the recursive
+// subtype is not expanded into a finite STRUCT — that subtree stays raw and re-enters
+// `WITH RECURSIVE` under its own bridge. The body is passed with the `repeat` directive stripped so
+// `viewPaths` walks it as a plain scope rooted at the element.
 export function repeatStructure(repeatNode, elemSchemaPath, schema, vars) {
 	const body = {column: repeatNode.column, select: repeatNode.select, unionAll: repeatNode.unionAll};
-	const path = repeatBodyPaths(body);
+	const path = viewPaths(body);
 	const ast = fhirpathToAst(path, elemSchemaPath, schema, vars);
 	const tree = extractPathsFromAst({asts: [ast]});
 	if (!tree.length) return "{}";
