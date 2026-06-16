@@ -65,6 +65,26 @@ export function repeatStructure(repeatNode, elemSchemaPath, schema, vars) {
 	return pathsToJsonStruct(tree);
 }
 
+// The `from_json` element structures for forced-JSON fields a scope's columns navigate (issue #35).
+// When a sibling `repeat` forces a field (e.g. `item`) to raw JSON[], a column navigating it
+// (`item.linkId.first()`) would emit JSON into its declared type. We re-type that field to a typed
+// STRUCT element so navigation yields typed values — the inline form of the repeat/forEach bridge.
+// For each forced field actually navigated by `columns` (rooted at `elemSeed`), returns the typed
+// element structure of the leaves under it; recursive/forced subtrees stay raw JSON via
+// `pathsToJsonStruct`, and from_json keeps only the listed keys. Fields not navigated are omitted.
+export function forcedFieldStructures(columns, elemSeed, forcedFields, schema, vars) {
+	if (!columns.length || !forcedFields.length) return new Map();
+	const ast = fhirpathToAst(viewPaths({column: columns}), elemSeed, schema, vars);
+	const tree = extractPathsFromAst({asts: [ast]});
+	const out = new Map();
+	forcedFields.forEach(field => {
+		const node = tree.find(n => n.value === field);
+		if (node && node.children && node.children.length)
+			out.set(field, pathsToJsonStruct(node.children));
+	});
+	return out;
+}
+
 // The element produced by iterating `pathStr` from `elem`. `B` exposes `compilePath`.
 export function childElemOf(pathStr, elem, B) {
 	const {type} = B.compilePath(pathStr, elem);

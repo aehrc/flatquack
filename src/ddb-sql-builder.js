@@ -63,6 +63,15 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 				sql = node.value;
 				outputType = {fhirType: node.type.fhirType, isArray: node.type.isArray, isNav: true};
 			}
+			// Issue #35: a field a sibling `repeat` forced to raw JSON[] is re-typed to its declared
+			// structure here, so navigation off it yields typed values rather than JSON — the inline
+			// form of the structural bridge the repeat/forEach paths use. `_retype` (field name ->
+			// from_json cast macro) rides on the scope element's `inputType`, so it is present only on
+			// the FIRST nav off that element (deeper segments carry a navigated child's outputType,
+			// which never holds `_retype`); thus only the element field itself is wrapped.
+			const reMacro = inputType._retype && inputType._retype[node.value];
+			if (reMacro)
+				sql = node.type.isArray ? `list_transform(${sql}, x -> ${reMacro}(x))` : `${reMacro}(${sql})`;
 			return {sql, outputType}
 
 		case 'literal':
