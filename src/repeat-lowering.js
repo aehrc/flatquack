@@ -66,19 +66,26 @@ export function repeatStructure(repeatNode, elemSchemaPath, schema, vars) {
 }
 
 // The `from_json` element structures for forced-JSON fields a scope's columns navigate (issue #35).
-// When a sibling `repeat` forces a field (e.g. `item`) to raw JSON[], a column navigating it
-// (`item.linkId.first()`) would emit JSON into its declared type. We re-type that field to a typed
-// STRUCT element so navigation yields typed values — the inline form of the repeat/forEach bridge.
-// For each forced field actually navigated by `columns` (rooted at `elemSeed`), returns the typed
-// element structure of the leaves under it; recursive/forced subtrees stay raw JSON via
-// `pathsToJsonStruct`, and from_json keeps only the listed keys. Fields not navigated are omitted.
+// When a sibling `repeat` forces a field (e.g. `item`, or the multi-segment `answer.item` of a
+// QuestionnaireResponse recursion) to raw JSON[], a column navigating it (`answer.item.linkId.first()`)
+// would emit JSON into its declared type. We re-type that field to a typed STRUCT element so
+// navigation yields typed values — the inline form of the repeat/forEach bridge. For each forced path
+// actually navigated by `columns` (rooted at `elemSeed`), returns the typed element structure of the
+// leaves under it, keyed by the SAME relative dot path; recursive/forced subtrees stay raw JSON via
+// `pathsToJsonStruct`, and from_json keeps only the listed keys. Paths not navigated are omitted.
 export function forcedFieldStructures(columns, elemSeed, forcedFields, schema, vars) {
 	if (!columns.length || !forcedFields.length) return new Map();
 	const ast = fhirpathToAst(viewPaths({column: columns}), elemSeed, schema, vars);
 	const tree = extractPathsFromAst({asts: [ast]});
 	const out = new Map();
 	forcedFields.forEach(field => {
-		const node = tree.find(n => n.value === field);
+		// Descend the navigation tree segment by segment to the (possibly nested) forced field.
+		let level = tree, node = null;
+		for (const seg of field.split(".")) {
+			node = level && level.find(n => n.value === seg);
+			if (!node) break;
+			level = node.children;
+		}
 		if (node && node.children && node.children.length)
 			out.set(field, pathsToJsonStruct(node.children));
 	});

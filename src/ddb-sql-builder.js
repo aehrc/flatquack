@@ -63,15 +63,26 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 				sql = node.value;
 				outputType = {fhirType: node.type.fhirType, isArray: node.type.isArray, isNav: true};
 			}
-			// Issue #35: a field a sibling `repeat` forced to raw JSON[] is re-typed to its declared
-			// structure here, so navigation off it yields typed values rather than JSON — the inline
-			// form of the structural bridge the repeat/forEach paths use. `_retype` (field name ->
-			// from_json cast macro) rides on the scope element's `inputType`, so it is present only on
-			// the FIRST nav off that element (deeper segments carry a navigated child's outputType,
-			// which never holds `_retype`); thus only the element field itself is wrapped.
-			const reMacro = inputType._retype && inputType._retype[node.value];
-			if (reMacro)
-				sql = node.type.isArray ? `list_transform(${sql}, x -> ${reMacro}(x))` : `${reMacro}(${sql})`;
+			// Issue #35 (universal): a field a sibling `repeat` forced to raw JSON[] is re-typed to its
+			// declared structure here, so navigation off it yields typed values rather than JSON — the
+			// inline form of the structural bridge the repeat/forEach paths use (all three sites share
+			// the `from_json` cast macro; see `castMacroFor`). `_retype` is keyed by path RELATIVE to the
+			// scope element (e.g. `answer.item`); it rides on the element `inputType` and is propagated
+			// down each matched segment onto the navigated `outputType`, so the cast fires at the exact
+			// depth where the physical JSON diverges from the declared type — not only the first segment.
+			// A path that crosses several forced boundaries re-types at each. Method-append form
+			// (`<expr>.macro(...)`) so the cast composes whether the field heads the path or is deeper.
+			const retypes = inputType._retype;
+			if (retypes) {
+				const castMac = retypes[node.value];
+				if (typeof castMac === "string")
+					sql = outputType.isArray ? `${sql}.list_transform(x -> ${castMac}(x))` : `${sql}.${castMac}()`;
+				const descPrefix = node.value + ".";
+				const descRetypes = {};
+				for (const k in retypes)
+					if (k.startsWith(descPrefix)) descRetypes[k.slice(descPrefix.length)] = retypes[k];
+				if (Object.keys(descRetypes).length) outputType = {...outputType, _retype: descRetypes};
+			}
 			return {sql, outputType}
 
 		case 'literal':
