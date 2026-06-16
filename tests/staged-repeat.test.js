@@ -163,7 +163,9 @@ describe("staged - %rowIndex over a repeat's own scope is a pre-order window", (
 			riView, fhirSchema, stagedQueryTemplate,
 			[["test_file_path", "/tmp/unused.json"]], verbose, true, null, null, "natural"
 		);
-		expect(sql).toMatch(/row_number\(\) OVER \(PARTITION BY rid ORDER BY path\)/);
+		// Internal carry/key/path columns are `_`-prefixed so they can never collide with a user
+		// column name (which must start with a letter): `_rid` partition, `_path` pre-order order.
+		expect(sql).toMatch(/row_number\(\) OVER \(PARTITION BY _rid ORDER BY _path\)/);
 	});
 });
 

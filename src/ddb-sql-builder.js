@@ -279,12 +279,13 @@ export function pathsToSchema(node, isInRoot=true) {
 	// it forces JSON regardless of any sibling navigation that would otherwise type it.
 	if (node.forceJson) {
 		sqlType = `JSON${arrayIndicator}`;
-	} else if (node.children.length) {
-		if (!node.fhirType) console.log(`${JSON.stringify(node)} is of an unknown type`)
-		sqlType = `STRUCT(${node.children.map(c => pathsToSchema(c, false)).join(", ")})${arrayIndicator}`
 	} else {
-		if (!node.fhirType) console.log(`${JSON.stringify(node)} is of an unknown type`)
-		sqlType = `${leafSqlType(node)}${arrayIndicator}`;
+		// Diagnostic only: a node without a resolved FHIR type still gets a best-effort SQL type.
+		// Warn on stderr — the compiled SQL goes to stdout, so logging here must not pollute it.
+		if (!node.fhirType) console.warn(`${JSON.stringify(node)} is of an unknown type`);
+		sqlType = node.children.length
+			? `STRUCT(${node.children.map(c => pathsToSchema(c, false)).join(", ")})${arrayIndicator}`
+			: `${leafSqlType(node)}${arrayIndicator}`;
 	}
 	return isInRoot ? `${node.value}: '${sqlType}'` : `${node.value} ${sqlType}`
 };

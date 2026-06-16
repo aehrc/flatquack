@@ -323,6 +323,14 @@ emitScope(selectNode, parentStage, ctxArrCol, key):
   internal key bookkeeping: they thread through CTEs but **never** appear in the
   result and never overwrite a VD column. (A VD `column` named `id` is the FHIR `id`
   via `SCALAR(node,'id',…)` — unrelated to `rid`.)
+  - **Enforced by an `_` prefix, not by convention.** A VD column name is a validated
+    SQL identifier matching `^[A-Za-z][A-Za-z0-9_]*$` (it must start with a letter), so
+    every internal identifier the emitter mints — the key (`_rid`), fork ordinals
+    (`_ord{N}`), a repeat's descent columns (`_node`, `_ord`, `_path`), its pre-order
+    index (`_nord{N}`), and all generated relation/column names — is `_`-prefixed and
+    therefore *cannot* collide with any legal VD column name, even one literally named
+    `rid`, `node`, or `path`. Without this, such a column would surface as a duplicate
+    column in a CTE (a hard binder error, or silent value loss in `uuid` mode).
 
 ---
 

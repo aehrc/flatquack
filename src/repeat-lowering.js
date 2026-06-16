@@ -69,7 +69,7 @@ export function repeatStructure(repeatNode, elemSchemaPath, schema, vars) {
 export function childElemOf(pathStr, elem, B) {
 	const {type} = B.compilePath(pathStr, elem);
 	return {
-		ref: "node",
+		ref: "_node",
 		inLambda: true,
 		seed: type.schemaPath,
 		inputType: {fhirType: type.fhirType, isArray: false, schemaPath: type.schemaPath}
