@@ -1,7 +1,6 @@
 {
   "title": "row_index_repeat",
-  "description": "Extended %rowIndex-over-repeat cases NOT covered by the official row_index.json (which has a single root-level repeat over one resource). Staged backend only: depth-first pre-order numbering for repeat, per-enclosing-instance partitioning, repeat-under-forEach, repeat-in-repeat, repeat-in-unionAll, and repeat-at-a-fork. Marked skip:true so the generic auto-discovery suites (spec.test.js / spec.staged.test.js) do not run it; a dedicated staged-only runner (see change add-rowindex-repeat-preorder) loads it directly and exercises only the staged template. Each test's discriminator column makes rows attributable under the order-independent Set comparison, so pre-order is verified by the index value bound to each linkId, not by output row order.",
-  "skip": true,
+  "description": "Extended %rowIndex-over-repeat cases NOT covered by the official row_index.json (which has a single root-level repeat over one resource). Staged backend only: depth-first pre-order numbering for repeat, per-enclosing-instance partitioning, repeat-under-forEach, repeat-in-repeat, repeat-in-unionAll, and repeat-at-a-fork. Each test's discriminator column makes rows attributable under the order-independent Set comparison, so pre-order is verified by the index value bound to each linkId, not by output row order.",
   "fhirVersion": ["5.0.0", "4.0.1", "3.0.2"],
   "resources": [
     {

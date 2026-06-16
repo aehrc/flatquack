@@ -1,61 +1,72 @@
 import fs from "fs";
 import path from "path";
-import {expect} from "bun:test"
 
-import {templateToQuery} from "../src/query-builder.js";
-import {testQueryTemplate, openMemoryDb, getColumns, executeQuery} from "../tests/test-util.js";
-import fhirSchema from "../schemas/fhir-schema-r4.json";
+import {buildStaged, scratchFile, openMemoryDb, getColumns, executeQuery} from "../tests/test-util.js";
 
 const outputPath = path.join(import.meta.dir, "../flatquack_test_output.json");
 const testDirectory = path.join(import.meta.dir, "../tests/spec-tests/");
 
 const testFiles = fs.readdirSync(testDirectory).filter(f => !(/\.temp\.json|skip$|^\./.test(f)));
 
-const results = testFiles.map(file => {
-	const testGroup = JSON.parse(fs.readFileSync(testDirectory + file))
-	const resourceFile = testDirectory + file + ".temp.json";
-	Bun.write(resourceFile, JSON.stringify(testGroup.resources)); 
-	
-	const results = testGroup.tests.map( async testCase => {
-		let passed = false;
-		const db = openMemoryDb();
-		try {
-			const querySql = templateToQuery(
-				testCase.view, fhirSchema, testQueryTemplate, 
-				[["test_file_path", resourceFile]], false, true
-			);
-			if (testCase.expect||testCase.expectError) {
-				const result = await executeQuery(db, querySql);
-				passed = expect(new Set(result)).toEqual(new Set(testCase.expect))
-					? false
-					: true;
-			}
-			if (testCase.expectColumns) {
-				const cols = await getColumns(db, querySql);
-				passed = expect(cols).toEqual(testCase.expectColumns)
-					? false
-					: true;
-			}
-		} catch(e) {
-			passed = testCase.expectError ? true : false;
+// One shared in-memory db for the whole run: opening/closing a duckdb instance per test segfaults
+// the native addon during teardown.
+const db = openMemoryDb();
+
+// Canonicalise a value so comparison ignores object-key order (DuckDB returns columns in query
+// order, fixtures list them in authoring order) and BigInt/Number differences.
+function canon(v) {
+	if (typeof v === "bigint") return Number(v);
+	if (Array.isArray(v)) return v.map(canon);
+	if (v && typeof v === "object")
+		return Object.keys(v).sort().reduce((o, k) => { o[k] = canon(v[k]); return o; }, {});
+	return v;
+}
+// Order-independent multiset comparison of result rows against the fixture's expectation.
+const asMultiset = rows => JSON.stringify((rows ?? []).map(r => JSON.stringify(canon(r))).sort());
+const sameRows = (a, b) => asMultiset(a) === asMultiset(b);
+const sameColumns = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// A case passes when it behaves as the fixture declares: an expectError case must throw; otherwise
+// the result rows (and any expectColumns) must match.
+async function runCase(testCase, resourceFile) {
+	if (testCase.expectError) {
+		try { await executeQuery(db, buildStaged(testCase.view, resourceFile)); return false; }
+		catch { return true; }
+	}
+	try {
+		const querySql = buildStaged(testCase.view, resourceFile);
+		if (testCase.expect) {
+			const result = await executeQuery(db, querySql);
+			if (!sameRows(result, testCase.expect)) return false;
 		}
-		db.close();
-		return {name: testCase.title, "result": {passed}};
-	});
+		if (testCase.expectColumns) {
+			const cols = await getColumns(db, querySql);
+			if (!sameColumns(cols, testCase.expectColumns)) return false;
+		}
+		return true;
+	} catch { return false; }
+}
 
-	return Promise.all(results).then(results => [file, results]);
-});
+const output = {};
+const stats = {passed: 0, failed: 0};
 
-Promise.all(results)
-	.then( data =>  {
-		const output = data.reduce((fileOutput, fileData) => {
-			return {...fileOutput, [fileData[0]]: {tests: fileData[1]}}
-		}, {})
-		let stats =  {passed:0, failed:0};
-		data.forEach(f => f[1].forEach(t => {
-			stats.passed = stats.passed + (t.result.passed ? 1 : 0);
-			stats.failed = stats.failed + (t.result.passed ? 0 : 1);
-		}))
-		console.log(stats)
-		Bun.write(outputPath, JSON.stringify(output)); 
-	})
+for (const file of testFiles) {
+	const testGroup = JSON.parse(fs.readFileSync(testDirectory + file));
+	const resourceFile = scratchFile(file + ".temp.json");
+	await Bun.write(resourceFile, JSON.stringify(testGroup.resources));
+
+	const tests = [];
+	for (const testCase of testGroup.tests) {
+		const passed = await runCase(testCase, resourceFile);
+		stats[passed ? "passed" : "failed"]++;
+		tests.push({name: testCase.title, result: {passed}});
+	}
+	output[file] = {tests};
+}
+
+console.log(stats);
+await Bun.write(outputPath, JSON.stringify(output));
+// NOTE: the duckdb native addon can segfault during process teardown on some Bun versions (seen on
+// Bun 1.3.1). This fires only AFTER the output above is fully written, so the report is complete and
+// correct regardless of the exit code.
+process.exit(0);

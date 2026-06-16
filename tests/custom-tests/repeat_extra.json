@@ -1,0 +1,104 @@
+{
+  "title": "repeat_extra",
+  "description": "Staged-emitter repeat regressions beyond the official repeat.json suite, which never reads more than one choice type at once, whose repeat+internal-fork cases all expect a single row (so cannot expose a per-node cross-product), and which has no array-navigating column directly in a repeat scope. Uses per-test `resources` (a custom-suite extension) so each regression carries its own data.",
+  "fhirVersion": ["5.0.0", "4.0.1", "3.0.2"],
+  "tests": [
+    {
+      "title": "choice-type ofType() forEach inside repeat (typed bridge)",
+      "description": "A forEach inside a repeat region whose columns use value.ofType(<type>) must re-establish typed evaluation off the from_json bridge element: value.ofType(string) -> el.valueString, value.ofType(integer) -> el.valueInteger. Each answer binds the matching choice type; the other is NULL.",
+      "resources": [
+        {
+          "resourceType": "QuestionnaireResponse", "id": "qr1",
+          "item": [
+            {"linkId": "1", "item": [{"linkId": "1.1", "answer": [{"valueString": "keep"}, {"valueString": "drop"}, {"valueInteger": 7}]}]}
+          ]
+        }
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          {"column": [{"name": "id", "path": "id", "type": "id"}]},
+          {
+            "repeat": ["item"],
+            "select": [
+              {"column": [{"name": "linkId", "path": "linkId", "type": "string"}]},
+              {
+                "forEach": "answer",
+                "column": [
+                  {"name": "answerString", "path": "value.ofType(string)", "type": "string"},
+                  {"name": "answerInteger", "path": "value.ofType(integer)", "type": "integer"}
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {"id": "qr1", "linkId": "1.1", "answerString": "keep", "answerInteger": null},
+        {"id": "qr1", "linkId": "1.1", "answerString": "drop", "answerInteger": null},
+        {"id": "qr1", "linkId": "1.1", "answerString": null, "answerInteger": 7}
+      ]
+    },
+    {
+      "title": "two forEach siblings inside a repeat recombine per node (fork inside repeat)",
+      "description": "Regression for FORK-inside-a-repeat-body: the descent CTE must carry a per-node identity into the fork key, else sibling forks recombine across ALL nodes of the resource instead of per node. Per node the two forEach:answer siblings cross-product: item 'a' (2 answers) -> 4 rows, item 'b' (1 answer) -> 1 row; v1/v2 always belong to the same item.",
+      "resources": [
+        {
+          "resourceType": "QuestionnaireResponse", "id": "qrf",
+          "item": [
+            {"linkId": "a", "answer": [{"valueString": "a1"}, {"valueString": "a2"}]},
+            {"linkId": "b", "answer": [{"valueString": "b1"}]}
+          ]
+        }
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          {"column": [{"name": "id", "path": "id", "type": "id"}]},
+          {
+            "repeat": ["item"],
+            "select": [
+              {"column": [{"name": "linkId", "path": "linkId", "type": "string"}]},
+              {"forEach": "answer", "column": [{"name": "v1", "path": "value.ofType(string)", "type": "string"}]},
+              {"forEach": "answer", "column": [{"name": "v2", "path": "value.ofType(string)", "type": "string"}]}
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {"id": "qrf", "linkId": "a", "v1": "a1", "v2": "a1"},
+        {"id": "qrf", "linkId": "a", "v1": "a1", "v2": "a2"},
+        {"id": "qrf", "linkId": "a", "v1": "a2", "v2": "a1"},
+        {"id": "qrf", "linkId": "a", "v1": "a2", "v2": "a2"},
+        {"id": "qrf", "linkId": "b", "v1": "b1", "v2": "b1"}
+      ]
+    },
+    {
+      "title": "collection column navigating an array inside repeat (lambda collision)",
+      "description": "Regression for REPEAT_LAMBDA_COLLISION_BUG: a column directly in a repeat scope whose path navigates through an array (answer.value.ofType(string)) compiles to list_transform(el -> ...). The lambda parameter must not collide with the repeat bridge element (also `el`), else el.valueString binds to the bridge struct and raises 'Could not find key valuestring'.",
+      "resources": [
+        {
+          "resourceType": "QuestionnaireResponse", "id": "qrc",
+          "item": [{"linkId": "a", "item": [{"linkId": "a.1", "answer": [{"valueString": "x"}, {"valueString": "y"}]}]}]
+        }
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          {"column": [{"name": "id", "path": "id", "type": "id"}]},
+          {
+            "repeat": ["item"],
+            "column": [
+              {"name": "linkId", "path": "linkId", "type": "string"},
+              {"name": "answers", "path": "answer.value.ofType(string)", "collection": true, "type": "string"}
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {"id": "qrc", "linkId": "a", "answers": []},
+        {"id": "qrc", "linkId": "a.1", "answers": ["x", "y"]}
+      ]
+    }
+  ]
+}
