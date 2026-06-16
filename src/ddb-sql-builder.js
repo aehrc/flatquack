@@ -125,7 +125,8 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 					};
 
 				case 'join':
-					sql = `list_aggregate('string_agg', ${(firstArg && firstArg.value) || "''"}).ifnull2('')`;
+					// join() over an empty collection yields empty (NULL), not "" — do not coerce.
+					sql = `list_aggregate('string_agg', ${(firstArg && firstArg.value) || "''"})`;
 					return {sql, outputType: {fhirType: "string", isArray: false}}
 				
 				case 'where':

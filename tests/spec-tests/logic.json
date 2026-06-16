@@ -92,7 +92,6 @@
     },
     {
       "title": "filtering with 'not'",
-      "only": true,
       "tags": ["shareable"],
       "view": {
         "resource": "Patient",

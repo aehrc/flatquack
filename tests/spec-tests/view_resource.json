@@ -74,7 +74,6 @@
     },
     {
       "title": "resource not specified",
-
       "tags": ["shareable"],
       "view": {
         "status": "active",

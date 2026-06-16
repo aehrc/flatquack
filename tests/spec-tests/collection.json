@@ -68,7 +68,8 @@
               {
                 "name": "first_name",
                 "path": "name.given",
-                "type": "string"
+                "type": "string",
+                "collection": true
               }
             ]
           }

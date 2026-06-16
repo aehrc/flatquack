@@ -2,6 +2,14 @@
 
 Run everything with `bun test`.
 
+## Vendored revision
+
+`spec-tests/` was vendored from [`FHIR/sql-on-fhir.js`](https://github.com/FHIR/sql-on-fhir.js)
+`tests/` at commit **`70c05667b5fc8f82bfce16a3a2a0e5b142e5c6d2`** (branch `main`, fetched 2026-06-16;
+the fixtures were last modified upstream in `80854a0`, 2026-05-31). To refresh, re-download every
+`tests/*.json` at a newer ref, keep `constant` / `constant_types` / `fn_boundary` under `skip/`, and
+update this revision.
+
 ## Layout
 
 | Path | What it is |

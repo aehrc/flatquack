@@ -92,7 +92,17 @@ export function runFixtureSuite({dir, db, rootKeyModes = ["natural", "uuid"]}) {
 			tests.forEach( (testCase, i) => {
 				// Per-test resources override the fixture default; each distinct resource set gets its
 				// own scratch file so cases never read each other's data.
-				const resources = testCase.resources ?? testGroup.resources;
+				const allResources = testCase.resources ?? testGroup.resources;
+				// A view applies only to resources of its declared `resource` type; flatquack reads the
+				// input with a type-coerced schema, so a foreign resourceType in the same file (e.g. an
+				// Organization with a scalar `name` alongside Patients whose `name` is an array) breaks
+				// the typed read. Feed only the matching type — the where-filter would drop the rest
+				// anyway, so results are unchanged, and it mirrors the per-resource-type engine model.
+				const viewType = testCase.view?.resource;
+				const matching = viewType
+					? allResources.filter(r => !r.resourceType || r.resourceType === viewType)
+					: allResources;
+				const resources = matching.length ? matching : allResources;
 				const resourceFile = scratchFile(`${fileName}.${i}.temp.json`);
 				rootKeyModes.forEach( rootKey => {
 					test( `${testCase.title} [${rootKey}]`, async () => {
