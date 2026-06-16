@@ -415,26 +415,25 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		realFanouts.forEach(f => { f.jsonMode = repeatSeedFields.has(f.node.forEach || f.node.forEachOrNull); });
 
 		// Fields forced to raw JSON[] at THIS element by any sibling `repeat` — its own repeat
-		// fan-outs plus any repeat branch inside a sibling unionAll (which shares this element). A
-		// column navigating such a field would emit JSON into its declared type; re-type it inline
-		// (issue #35). Only on the typed spine (schemaPrefix set) does the read schema actually force
-		// these (see applyForcedJson), so the re-type is gated on it — fork/repeat-body scopes, where
-		// the field is not forced, are left untouched. Single-segment seeds (the common shape) only.
+		// fan-outs plus any repeat branch inside a sibling unionAll (which shares this element).
 		const allRepeatSeeds = new Set([
-			...repeatFanouts.flatMap(f => f.node.repeat),
+			...repeatSeedFields,
 			...unionFanouts.flatMap(f => unionRepeatSeeds(f.node.unionAll))
 		]);
+
+		// A column navigating a forced field would emit JSON into its declared type; re-type it
+		// inline (issue #35). Gated on the typed spine (schemaPrefix set), where the read schema
+		// actually forces these (see applyForcedJson) — fork/repeat-body scopes, where the field is
+		// not forced, are left untouched. Single-segment seeds (the common shape) only.
+		const forcedFields = schemaPrefix ? [...allRepeatSeeds].filter(p => !p.includes(".")) : [];
 		let retypeMap = null;
-		if (schemaPrefix) {
-			const forcedFields = [...allRepeatSeeds].filter(p => !p.includes("."));
-			if (forcedFields.length) {
-				const navCols = [...columns, ...unionFanouts.flatMap(f => unionColumnsOnlyCols(f.node.unionAll))];
-				const structs = forcedFieldStructures(navCols, elem.seed, forcedFields, schema, vars);
-				if (structs.size) {
-					retypeMap = {};
-					for (const [field, struct] of structs)
-						retypeMap[field] = castMacroFor(struct, B.childElemOf(field, elem).seed);
-				}
+		if (forcedFields.length) {
+			const navCols = [...columns, ...unionFanouts.flatMap(f => unionColumnsOnlyCols(f.node.unionAll))];
+			const structs = forcedFieldStructures(navCols, elem.seed, forcedFields, schema, vars);
+			if (structs.size) {
+				retypeMap = {};
+				for (const [field, struct] of structs)
+					retypeMap[field] = castMacroFor(struct, B.childElemOf(field, elem).seed);
 			}
 		}
 
@@ -607,25 +606,25 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	function emitUnion(prepared, relName, carried, keyCols) {
 		const parts = [];
 		let cols = null;
+		// A bridged branch (a repeat's JSON descent, or a forEach over a repeat-forced field) selects
+		// its body columns — keyed and carried — from the relation the bridge produced.
+		const pushBridged = (br) => {
+			const bodyCols = br.cols.slice(carried.length);
+			cols = cols || bodyCols;
+			parts.push(`SELECT ${[...keyCols, ...carried, ...bodyCols].join(", ")} FROM ${br.rel}`);
+		};
 		const collect = (entries, srcRel) => {
 			entries.forEach(e => {
 				if (e.nested) { collect(e.nested, srcRel); return; }
 				if (e.repeat) {
 					// a repeat branch: descend in JSON, then select its body columns keyed/carried
-					const br = emitRepeat(e.repeat, srcRel, carried, keyCols);
-					const bodyCols = br.cols.slice(carried.length);
-					cols = cols || bodyCols;
-					const sel = [...keyCols, ...carried, ...bodyCols];
-					parts.push(`SELECT ${sel.join(", ")} FROM ${br.rel}`);
+					pushBridged(emitRepeat(e.repeat, srcRel, carried, keyCols));
 				} else if (e.arrCol) {
 					if (e.jsonMode) {
 						// forEach branch over a repeat-forced field: consume each element through the same
 						// from_json typed bridge a sibling forEach/repeat uses, so its columns share the
 						// repeat branch's physical types and the UNION ALL reconciles (issue #35).
-						const br = emitJsonEach(e, srcRel, carried, keyCols, null);
-						const bodyCols = br.cols.slice(carried.length);
-						cols = cols || bodyCols;
-						parts.push(`SELECT ${[...keyCols, ...carried, ...bodyCols].join(", ")} FROM ${br.rel}`);
+						pushBridged(emitJsonEach(e, srcRel, carried, keyCols, null));
 					} else {
 						// Each iterating unionAll branch gets its own `%rowIndex` ordinal (resets per
 						// branch), exactly like a forEach/forEachOrNull elsewhere.
