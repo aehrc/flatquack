@@ -4,8 +4,7 @@ The mechanism that lets flatquack read a field as **raw JSON** in one place and 
 **typed value** in another, within the same query — deciding the typing *on demand* per
 navigation rather than once in the read schema. It is what makes a `repeat` (which needs
 a raw-JSON view of a recursive field) coexist with typed columns/filters that navigate the
-same field. Implements the fix for issue #35 and generalises it to any depth and any site
-that crosses the boundary.
+same field, at any depth and any site that crosses the boundary.
 
 Companion to [SPEC_hybrid.md](./SPEC_hybrid.md), which describes the staged emitter and the
 `repeat` lowering this builds on.
@@ -102,30 +101,44 @@ Two subtleties make this precise:
   `.item`, the exact depth where physical JSON diverges. A path crossing several forced
   boundaries re-types at each. The method-append form (`<expr>.macro(...)`) composes whether
   the forced field heads the path or sits deeper.
-- Operator nodes that hold sub-expressions thread `inputType` (hence `_retype`) into each
-  operand: both `comparison` (`=`, `<`, …) and `components` (`and`/`or`/`+`/`-`/`*`). So an
-  operand that itself navigates a forced field — `item.maxLength.first() + 1` — is re-typed at
-  its boundary just like a bare column. (Missing this on `components` was a bug: arithmetic then
-  bound raw JSON and threw `+(JSON, INTEGER)`; a boolean combinator was silently masked by
-  DuckDB's JSON→BOOLEAN coercion. Pinned by `ondemand_typing` B11/B12 and a shape assertion.)
+- Nodes that hold sub-expressions thread `inputType` (hence `_retype`) into each: `comparison`
+  (`=`, `<`, …), `components` (`and`/`or`/`+`/`-`/`*`), and the **`where` lambda**. So an operand
+  or predicate that itself navigates a forced field — `item.maxLength.first() + 1`, or a forced
+  field reached first inside the lambda as `where(item.linkId.first() = 'x')` — is re-typed at its
+  boundary just like a bare column. The `where` lambda resets the *structural* type (its predicate
+  navigates from a fresh `el`) but keeps the `_retype` channel: it passes `{_retype:
+  inputType._retype}`, not `{}`. The map's keys are relative to the scope element, which is exactly
+  what `el` binds (the singleton, or each array element), so the cast still fires at its divergence
+  depth.
+  - **Invariant:** any node that holds a sub-expression *and* imposes a SQL type on it must thread
+    `_retype`; otherwise that sub-expression binds raw JSON instead of the typed value. The
+    structural tell of a thread that is missing is an **orphaned `fq_cast_*` macro** — derived and
+    minted from the navigated paths, but never applied at a nav site (guarded by the "no orphaned
+    cast macros" shape assertion).
 
 ## 4. Where it fires — and where it does not
 
 Applied at the **typed spine** (gated on `schemaPrefix`), where the read schema actually
 forces JSON:
 
-- root columns, chain-`forEach` columns (including nested levels);
+- root columns, chain-`forEach` columns (including nested levels) — re-typing is decided
+  **per scope**: `emitScope` recurses, recomputing the scope's own forced seeds and `_retype`
+  map, so a forced field that a *nested* `repeat` introduces inside a `forEach` body is re-typed
+  by that body's columns;
 - `unionAll` **columns-only** branches (they share the parent element);
 - `where` paths (they evaluate at the resource root — the staged builder hands
   `query-builder` a resource-rooted `whereRetype` map so a `where` that navigates a forced
-  field is re-typed exactly like a root column).
+  field is re-typed exactly like a root column);
+- a forced field reached **first inside a `where()` lambda** — `where(item.linkId.first() = 'x')`,
+  implicit `$this`, no outer nav — because the lambda preserves the `_retype` channel (§3).
 
 **Not** applied — and not needed — where the element already arrives typed through a
 `from_json` bridge:
 
 - `repeat` bodies (the bridge already types the body's navigated leaves);
-- `forEach` branches over a forced field (routed through `emitJsonEach`, which bridges the
-  whole element);
+- a `forEach` whose **own iteration path is the forced field** (routed through `emitJsonEach`,
+  which bridges the whole element) — distinct from a `forEach` that merely *contains* a nested
+  `repeat`, whose body columns re-type normally (above);
 - fork branches (they read pre-materialised typed arrays).
 
 It is a **no-op for non-repeat views**: if nothing is forced, the `_retype` map is `null` and
@@ -179,9 +192,14 @@ divergence point, pooled across every site that needs the same shape.
 - `tests/custom-tests/ondemand_typing.json` — the systematic matrix: context × boundary depth
   (A), one case per boundary-crossing operator (B), `unionAll` branch-kind combinations (C),
   declared-type fidelity (D), probes (G), multiplicity & deep navigation (H).
+  - B13/B14 pin the `where()`-lambda first-touch boundary (column-expression and ViewDefinition
+    `where`-clause forms): a forced field reached first inside the lambda is re-typed, not bound
+    as raw JSON.
 - `tests/staged-sql-shape.test.js` — macro-pooling assertions (reuse vs distinct; merged
-  structures) and no-op invariants (non-repeat → no macro; only the crossing column wrapped).
+  structures), no-op invariants (non-repeat → no macro; only the crossing column wrapped), and
+  the **no-orphaned-macro** guard (every minted `fq_cast_*` is called — the structural tell of a
+  re-type map built but not threaded to its nav site).
 - `tests/custom-tests/repeat_extra.json`, `tests/custom-tests/repeat_nested_forced_json.json`
-  — the original #35 regressions (single- and multi-segment).
+  — single- and multi-segment forced-field navigation by typed columns.
 - `tests/spec-tests/repeat.json` → "unionAll with repeat and non-repeat branches" — the
-  official conformance case that first surfaced the bug.
+  official conformance case for a `unionAll` of repeat and non-repeat branches over a forced field.

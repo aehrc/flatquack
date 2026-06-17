@@ -152,3 +152,41 @@ describe("staged - on-demand typing: components-operand boundary crossing", () =
 		expect(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"})).toMatch(cast);
 	});
 });
+
+// Every minted `fq_cast_*` macro must actually be CALLED somewhere in the body. A macro that is
+// defined but never referenced ("orphaned") is the structural tell of a re-type map that was built
+// but failed to thread to the navigation site — e.g. a forced field reached first inside a `where()`
+// lambda whose predicate dropped `_retype` (the boundary `forcedFieldStructures` still derived the
+// structure, minting the macro, but the leaf engine never applied it). This guard is the cheap,
+// view-agnostic detector for that whole class; the behavioural fixtures (ondemand_typing B13/B14)
+// pin the specific where()-lambda case.
+describe("staged - on-demand typing: no orphaned cast macros", () => {
+	const orphans = sql => {
+		const defined = [...sql.matchAll(/CREATE OR REPLACE MACRO (fq_cast_\w+)\(/g)].map(m => m[1]);
+		// A defined-and-used macro appears at least twice: once in its CREATE, once at a call site.
+		return defined.filter(name => (sql.match(new RegExp(`${name}\\(`, "g")) || []).length < 2);
+	};
+	// The where-lambda predicate navigates `maxLength` while the repeat body reads `linkId`, so the
+	// lambda's cast structure ({"maxLength":"INTEGER"}) is DISTINCT from the repeat bridge
+	// ({"linkId":"VARCHAR"}) and cannot be masked by pooling: if the lambda fails to thread `_retype`
+	// the maxLength macro is minted but never called, and this guard flags it.
+	const views = {
+		"where() lambda reaches the forced field first": {resource: "Questionnaire", select: [
+			{column: [{name: "v", path: "where(item.maxLength.first() = 6).exists()", type: "boolean"}]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]},
+		"where-clause lambda reaches the forced field first": {resource: "Questionnaire",
+			where: [{path: "where(item.maxLength.first() = 6).exists()"}], select: [
+				{column: [{name: "id", path: "id", type: "id"}]},
+				{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+			]},
+		"columns-only crossing": {resource: "Questionnaire", select: [
+			{column: [{name: "v", path: "item.linkId.first()", type: "string"}]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]}
+	};
+	for (const [label, view] of Object.entries(views))
+		test(`no orphaned macro: ${label}`, () => {
+			expect(orphans(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"}))).toEqual([]);
+		});
+});

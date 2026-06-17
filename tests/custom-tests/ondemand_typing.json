@@ -180,6 +180,24 @@
       "expect": [ { "v": true, "rl": "x" }, { "v": true, "rl": "y" } ]
     },
     {
+      "title": "B13 where() lambda crossing the boundary first (implicit $this)",
+      "description": "A bare `where(item.linkId.first() = 'x')` applied to the scope element with implicit `$this` reaches the repeat-forced `item` ONLY inside the lambda. The `where` case must thread `_retype` into its predicate, else `item` binds raw JSON and the string comparison throws `Conversion Error: Malformed JSON` (the original #35 failure). Typed, the first item's linkId is 'x', so the predicate holds.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "firstIsX", "path": "where(item.linkId.first() = 'x').exists()", "type": "boolean" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "firstIsX": true, "rl": "x" }, { "firstIsX": true, "rl": "y" } ]
+    },
+    {
+      "title": "B14 where-clause lambda crossing the boundary first (implicit $this)",
+      "description": "Same first-touch-inside-lambda boundary as B13 but at the ViewDefinition `where` clause: the resource-rooted re-type map must survive the `where()` lambda barrier so the predicate sees a typed `item.linkId` instead of throwing on raw JSON.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "where": [ { "path": "where(item.linkId.first() = 'x').exists()" } ], "select": [
+        { "column": [ { "name": "id", "path": "id", "type": "id" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "id": "q2c", "rl": "x" }, { "id": "q2c", "rl": "y" } ]
+    },
+    {
       "title": "C1 unionAll forEach x repeat over the forced field",
       "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
         { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },

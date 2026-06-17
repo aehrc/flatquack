@@ -72,6 +72,16 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 			// depth where the physical JSON diverges from the declared type — not only the first segment.
 			// A path that crosses several forced boundaries re-types at each. Method-append form
 			// (`<expr>.macro(...)`) so the cast composes whether the field heads the path or is deeper.
+			//
+			// MAINTENANCE RULE: the `nav` case is the only site that APPLIES the cast, but it only sees
+			// `_retype` if every enclosing node THREADS `inputType` (hence `_retype`) into its sub-
+			// expressions. Any node that holds a sub-expression AND imposes a SQL type on it must thread:
+			// today `comparison`, `components` (and/or/+/-/*), and the `where` lambda do. A new such node
+			// that forgets will not error — it binds raw JSON and silently mis-evaluates (the masked
+			// JSON->BOOLEAN coercion class; see `components` and the `where` comments). The cheap detector
+			// is an orphaned `fq_cast_*` macro: built but never called (staged-sql-shape "no orphaned
+			// cast macros"). Lambda-bearing nodes reset the STRUCTURAL type but must keep the `_retype`
+			// channel — pass `{_retype: inputType._retype}`, not `{}`.
 			const retypes = inputType._retype;
 			if (retypes) {
 				const castMac = retypes[node.value];
@@ -155,14 +165,22 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 					return {sql, outputType: {fhirType: "string", isArray: false}}
 				
 				case 'where':
+					// The predicate resets the STRUCTURAL type (its lambda navigates from a fresh `el`),
+					// but must preserve the `_retype` channel (issue #35): a repeat-forced field reached
+					// FIRST inside the lambda — `where(item.maxLength = 6)`, implicit `$this`, with no outer
+					// nav to fire the cast — would otherwise bind raw JSON and silently mis-compare. The
+					// `_retype` keys are relative to the scope element, which is exactly what `el` binds here
+					// (the singleton, or each array element), so the cast still fires at its divergence depth.
+					// `{_retype: undefined}` is a no-op for non-forced views (byte-for-byte unchanged).
+					const lamInput = {_retype: inputType._retype};
 					if (inputType && inputType.isArray) {
-						sql = `list_filter(el -> ${flattenSql(astToSql(firstArg, true, {}, "el", rowIndexSql)).sql})`;
+						sql = `list_filter(el -> ${flattenSql(astToSql(firstArg, true, lamInput, "el", rowIndexSql)).sql})`;
 						outputType = {fhirType: inputType.fhirType, isArray: true}
 					} else if (inputType.fhirType) {
-						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(firstArg, true, {}, "el", rowIndexSql)).sql}).slice(1)`;
+						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(firstArg, true, lamInput, "el", rowIndexSql)).sql}).slice(1)`;
 						outputType = {fhirType: inputType.fhirType, isArray: false}
 					} else {
-						sql = flattenSql(astToSql(firstArg, undefined, {}, rootVar, rowIndexSql)).sql;
+						sql = flattenSql(astToSql(firstArg, undefined, lamInput, rootVar, rowIndexSql)).sql;
 						outputType = {fhirType: "boolean_expr", isArray: false}
 					}
 					return {sql, outputType}
