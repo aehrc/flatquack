@@ -1,0 +1,328 @@
+{
+  "title": "ondemand_typing",
+  "description": "Systematic coverage for hybrid on-demand typing (issue #35): when a `repeat` forces a field to raw JSON[], any typed navigation that crosses that JSON boundary is re-typed inline (from_json) at the divergence point. Dimensions: (A) context establishing the parent element x boundary depth; (B) the FHIRPath operator that crosses the boundary, one per case; (C) unionAll branch-kind combinations; (D) declared-type fidelity; (G) gap probes authored with the CORRECT expected output; (H) multiple forced fields + deep (recursion-truncated) navigation. Distinct values throughout so the order-independent Set comparison cannot mask a duplicate. Macro pooling and no-op invariants live in tests/staged-sql-shape.test.js (they inspect emitted SQL).",
+  "fhirVersion": ["5.0.0", "4.0.1", "3.0.2"],
+  "tests": [
+    {
+      "title": "A1 root context, boundary at depth 0 (item)",
+      "description": "Root column item.linkId.first() crosses the repeat-forced `item`.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "maxLength": 10, "item": [ { "linkId": "g1.1", "type": "display", "maxLength": 11, "item": [ { "linkId": "g1.1.1", "type": "string", "maxLength": 12 } ] } ] },
+        { "linkId": "g2", "type": "group", "maxLength": 20 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "firstLink", "path": "item.linkId.first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [
+        { "firstLink": "g1", "rl": "g1" }, { "firstLink": "g1", "rl": "g1.1" },
+        { "firstLink": "g1", "rl": "g1.1.1" }, { "firstLink": "g1", "rl": "g2" } ]
+    },
+    {
+      "title": "A2 root context, boundary at depth +1 (item.item)",
+      "description": "repeat:[item.item] forces `item.item`; column item.item.linkId.first() diverges to JSON at the SECOND segment.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "nested", "path": "item.item.linkId.first()", "type": "string" } ] },
+        { "repeat": ["item.item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "nested": "g1.1", "rl": "g1.1" } ]
+    },
+    {
+      "title": "A3 root context, boundary at depth +2 (item.item.item)",
+      "description": "repeat:[item.item.item] forces a field three segments deep; the cast must fire at that depth.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "deep", "path": "item.item.item.linkId.first()", "type": "string" } ] },
+        { "repeat": ["item.item.item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "deep": "g1.1.1", "rl": "g1.1.1" } ]
+    },
+    {
+      "title": "A4 chain forEach context, boundary at depth 0",
+      "description": "Inside forEach:item, column item.linkId.first() crosses the item-relative repeat-forced `item`.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "select": [ { "forEach": "item", "select": [
+        { "column": [ { "name": "sub", "path": "item.linkId.first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] } ] },
+      "expect": [ { "sub": "g1.1", "rl": "g1.1" }, { "sub": "g1.1", "rl": "g1.1.1" } ]
+    },
+    {
+      "title": "A5 chain forEach context, boundary at depth +1 (dotted answer.item)",
+      "description": "Inside forEach:item, answer.item.linkId.first() crosses the repeat-forced dotted `answer.item`.",
+      "resources": [ { "resourceType": "QuestionnaireResponse", "id": "qrD", "item": [
+        { "linkId": "top", "answer": [ { "valueString": "av", "item": [ { "linkId": "N1" }, { "linkId": "N2" } ] } ], "item": [ { "linkId": "c1" } ] } ] } ],
+      "view": { "resource": "QuestionnaireResponse", "select": [ { "forEach": "item", "select": [
+        { "column": [ { "name": "nl", "path": "answer.item.linkId.first()", "type": "string" } ] },
+        { "repeat": ["answer.item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] } ] },
+      "expect": [ { "nl": "N1", "rl": "N1" }, { "nl": "N1", "rl": "N2" } ]
+    },
+    {
+      "title": "A6 nested forEach>forEach context, boundary at depth 0",
+      "description": "Two-level chain spine (schemaPrefix item.item); the crossing column re-types at the deeper spine scope.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qN", "item": [
+        { "linkId": "A", "type": "group", "item": [ { "linkId": "A1", "type": "group", "item": [ { "linkId": "A1a" }, { "linkId": "A1b" } ] } ] } ] } ],
+      "view": { "resource": "Questionnaire", "select": [ { "forEach": "item", "select": [ { "forEach": "item", "select": [
+        { "column": [ { "name": "gl", "path": "item.linkId.first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] } ] } ] },
+      "expect": [ { "gl": "A1a", "rl": "A1a" }, { "gl": "A1a", "rl": "A1b" } ]
+    },
+    {
+      "title": "A7 forEachOrNull context, boundary at depth 0",
+      "description": "forEachOrNull spine context (LEFT JOIN unnest); re-type must still fire on the crossing column.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "select": [ { "forEachOrNull": "item", "select": [
+        { "column": [ { "name": "sub", "path": "item.linkId.first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] } ] },
+      "expect": [ { "sub": "g1.1", "rl": "g1.1" }, { "sub": "g1.1", "rl": "g1.1.1" } ]
+    },
+
+    {
+      "title": "B1 operator first() crossing the boundary",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item.linkId.first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": "x", "rl": "x" }, { "v": "x", "rl": "y" } ]
+    },
+    {
+      "title": "B2 operator indexer [n] crossing the boundary",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item[1].linkId", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": "y", "rl": "x" }, { "v": "y", "rl": "y" } ]
+    },
+    {
+      "title": "B3 operator where() crossing the boundary",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item.where(maxLength = 6).linkId.first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": "y", "rl": "x" }, { "v": "y", "rl": "y" } ]
+    },
+    {
+      "title": "B4 operator exists() crossing the boundary",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item.exists()", "type": "boolean" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": true, "rl": "x" }, { "v": true, "rl": "y" } ]
+    },
+    {
+      "title": "B5 operator empty() crossing the boundary",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item.where(linkId = 'zzz').empty()", "type": "boolean" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": true, "rl": "x" }, { "v": true, "rl": "y" } ]
+    },
+    {
+      "title": "B6 operator join() crossing the boundary",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item.linkId.join('|')", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": "x|y", "rl": "x" }, { "v": "x|y", "rl": "y" } ]
+    },
+    {
+      "title": "B7 collection column crossing the boundary",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item.linkId", "type": "string", "collection": true } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": ["x", "y"], "rl": "x" }, { "v": ["x", "y"], "rl": "y" } ]
+    },
+    {
+      "title": "B8 comparison operator crossing the boundary",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item.maxLength.first() > 4", "type": "boolean" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": true, "rl": "x" }, { "v": true, "rl": "y" } ]
+    },
+    {
+      "title": "B9 empty-result crossing the boundary yields null (no error)",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item.where(linkId = 'zzz').linkId.first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": null, "rl": "x" }, { "v": null, "rl": "y" } ]
+    },
+    {
+      "title": "B10 single ofType() choice crossing the boundary",
+      "resources": [ { "resourceType": "QuestionnaireResponse", "id": "qrc2", "item": [ { "linkId": "q", "answer": [ { "valueString": "S" }, { "valueInteger": 9 } ] } ] } ],
+      "view": { "resource": "QuestionnaireResponse", "select": [
+        { "column": [ { "name": "os", "path": "item.answer.value.ofType(string).first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "os": "S", "rl": "q" } ]
+    },
+    {
+      "title": "C1 unionAll forEach x repeat over the forced field",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "select": [ { "unionAll": [
+        { "forEach": "item", "column": [ { "name": "k", "path": "'each'", "type": "string" }, { "name": "linkId", "path": "linkId", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "k", "path": "'item'", "type": "string" }, { "name": "linkId", "path": "linkId", "type": "string" } ] } ] } ] },
+      "expect": [
+        { "k": "each", "linkId": "g1" }, { "k": "each", "linkId": "g2" },
+        { "k": "item", "linkId": "g1" }, { "k": "item", "linkId": "g1.1" }, { "k": "item", "linkId": "g1.1.1" }, { "k": "item", "linkId": "g2" } ]
+    },
+    {
+      "title": "C2 unionAll columns-only x repeat over the forced field",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "select": [ { "unionAll": [
+        { "column": [ { "name": "k", "path": "'root'", "type": "string" }, { "name": "linkId", "path": "item.linkId.first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "k", "path": "'item'", "type": "string" }, { "name": "linkId", "path": "linkId", "type": "string" } ] } ] } ] },
+      "expect": [
+        { "k": "root", "linkId": "g1" },
+        { "k": "item", "linkId": "g1" }, { "k": "item", "linkId": "g1.1" }, { "k": "item", "linkId": "g1.1.1" }, { "k": "item", "linkId": "g2" } ]
+    },
+    {
+      "title": "C3 unionAll all three branch kinds (flat)",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "select": [ { "unionAll": [
+        { "column": [ { "name": "k", "path": "'root'", "type": "string" }, { "name": "linkId", "path": "item.linkId.first()", "type": "string" } ] },
+        { "forEach": "item", "column": [ { "name": "k", "path": "'each'", "type": "string" }, { "name": "linkId", "path": "linkId", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "k", "path": "'item'", "type": "string" }, { "name": "linkId", "path": "linkId", "type": "string" } ] } ] } ] },
+      "expect": [
+        { "k": "root", "linkId": "g1" },
+        { "k": "each", "linkId": "g1" }, { "k": "each", "linkId": "g2" },
+        { "k": "item", "linkId": "g1" }, { "k": "item", "linkId": "g1.1" }, { "k": "item", "linkId": "g1.1.1" }, { "k": "item", "linkId": "g2" } ]
+    },
+    {
+      "title": "C4 nested unionAll all three branch kinds",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "select": [ { "unionAll": [
+        { "unionAll": [
+          { "column": [ { "name": "k", "path": "'root'", "type": "string" }, { "name": "linkId", "path": "item.linkId.first()", "type": "string" } ] },
+          { "forEach": "item", "column": [ { "name": "k", "path": "'each'", "type": "string" }, { "name": "linkId", "path": "linkId", "type": "string" } ] } ] },
+        { "repeat": ["item"], "column": [ { "name": "k", "path": "'item'", "type": "string" }, { "name": "linkId", "path": "linkId", "type": "string" } ] } ] } ] },
+      "expect": [
+        { "k": "root", "linkId": "g1" },
+        { "k": "each", "linkId": "g1" }, { "k": "each", "linkId": "g2" },
+        { "k": "item", "linkId": "g1" }, { "k": "item", "linkId": "g1.1" }, { "k": "item", "linkId": "g1.1.1" }, { "k": "item", "linkId": "g2" } ]
+    },
+    {
+      "title": "C5 unionAll over a dotted forced field inside forEach",
+      "resources": [ { "resourceType": "QuestionnaireResponse", "id": "qrD", "item": [
+        { "linkId": "top", "answer": [ { "valueString": "av", "item": [ { "linkId": "N1" }, { "linkId": "N2" } ] } ] } ] } ],
+      "view": { "resource": "QuestionnaireResponse", "select": [ { "forEach": "item", "select": [ { "unionAll": [
+        { "column": [ { "name": "k", "path": "'agg'", "type": "string" }, { "name": "linkId", "path": "answer.item.linkId.join('|')", "type": "string" } ] },
+        { "repeat": ["answer.item"], "column": [ { "name": "k", "path": "'node'", "type": "string" }, { "name": "linkId", "path": "linkId", "type": "string" } ] } ] } ] } ] },
+      "expect": [
+        { "k": "agg", "linkId": "N1|N2" },
+        { "k": "node", "linkId": "N1" }, { "k": "node", "linkId": "N2" } ]
+    },
+
+    {
+      "title": "D1 declared-type fidelity: string / integer / boolean",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qD", "item": [
+        { "linkId": "g1", "type": "group", "maxLength": 10, "required": true, "item": [ { "linkId": "g1.1", "type": "string" } ] },
+        { "linkId": "g2", "type": "group", "maxLength": 20 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [
+          { "name": "typ", "path": "item.type.first()", "type": "code" },
+          { "name": "mx", "path": "item.maxLength.first()", "type": "integer" },
+          { "name": "req", "path": "item.required.first()", "type": "boolean" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [
+        { "typ": "group", "mx": 10, "req": true, "rl": "g1" },
+        { "typ": "group", "mx": 10, "req": true, "rl": "g1.1" },
+        { "typ": "group", "mx": 10, "req": true, "rl": "g2" } ]
+    },
+    {
+      "title": "D2 declared-type fidelity: decimal crossing the boundary",
+      "description": "ofType(decimal) across the forced `item` casts to DOUBLE. Single-type answer so ofType().first() is unaffected by the (orthogonal) ofType-as-projection behaviour.",
+      "resources": [ { "resourceType": "QuestionnaireResponse", "id": "qdec", "item": [ { "linkId": "q", "answer": [ { "valueDecimal": 2.5 } ] } ] } ],
+      "view": { "resource": "QuestionnaireResponse", "select": [
+        { "column": [ { "name": "dec", "path": "item.answer.value.ofType(decimal).first()", "type": "decimal" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "dec": 2.5, "rl": "q" } ]
+    },
+    {
+      "title": "D3 declared-type fidelity: date crossing the boundary",
+      "description": "ofType(date) across the forced `item` casts to VARCHAR (FHIR dates stay strings).",
+      "resources": [ { "resourceType": "QuestionnaireResponse", "id": "qdate", "item": [ { "linkId": "q", "answer": [ { "valueDate": "2021-05-06" } ] } ] } ],
+      "view": { "resource": "QuestionnaireResponse", "select": [
+        { "column": [ { "name": "dt", "path": "item.answer.value.ofType(date).first()", "type": "date" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "dt": "2021-05-06", "rl": "q" } ]
+    },
+    {
+      "title": "D4 declared-type fidelity: integer crossing the boundary",
+      "description": "ofType(integer) across the forced `item` casts to INTEGER.",
+      "resources": [ { "resourceType": "QuestionnaireResponse", "id": "qint", "item": [ { "linkId": "q", "answer": [ { "valueInteger": 9 } ] } ] } ],
+      "view": { "resource": "QuestionnaireResponse", "select": [
+        { "column": [ { "name": "oi", "path": "item.answer.value.ofType(integer).first()", "type": "integer" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "oi": 9, "rl": "q" } ]
+    },
+
+    {
+      "title": "G1 PROBE where-filter crossing the boundary",
+      "description": "A `where` filter navigating the repeat-forced `item`. where paths are compiled without the re-type map; correct behaviour is the filter resolves true and all repeat rows are emitted.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "where": [ { "path": "item.where(linkId = 'g1').exists()" } ], "select": [
+        { "column": [ { "name": "id", "path": "id", "type": "id" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [
+        { "id": "qS", "rl": "g1" }, { "id": "qS", "rl": "g1.1" }, { "id": "qS", "rl": "g1.1.1" }, { "id": "qS", "rl": "g2" } ]
+    },
+    {
+      "title": "G2 column in a repeat body navigating the recursive seed",
+      "description": "Inside a repeat:[item] body, item.linkId.first() navigates the body element's own `item` (rendered JSON by the bridge). Correct: the next-level first child's linkId as a plain string (null when none).",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "select": [ { "repeat": ["item"], "column": [
+        { "name": "rl", "path": "linkId", "type": "string" },
+        { "name": "childFirst", "path": "item.linkId.first()", "type": "string" } ] } ] },
+      "expect": [
+        { "rl": "g1", "childFirst": "g1.1" }, { "rl": "g1.1", "childFirst": "g1.1.1" },
+        { "rl": "g1.1.1", "childFirst": null }, { "rl": "g2", "childFirst": null } ]
+    },
+
+    {
+      "title": "H1 multiple forced fields at one scope (distinct macros)",
+      "description": "Inside forEach:item, two sibling repeats force both `item` and `answer`; columns ic and ac cross each, needing two distinct from_json structures.",
+      "resources": [ { "resourceType": "QuestionnaireResponse", "id": "qrh", "item": [
+        { "linkId": "top", "answer": [ { "valueString": "A1" }, { "valueString": "A2" } ], "item": [ { "linkId": "sub" } ] } ] } ],
+      "view": { "resource": "QuestionnaireResponse", "select": [ { "forEach": "item", "select": [
+        { "column": [
+          { "name": "ic", "path": "item.linkId.first()", "type": "string" },
+          { "name": "ac", "path": "answer.value.ofType(string).first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "ri", "path": "linkId", "type": "string" } ] },
+        { "repeat": ["answer"], "column": [ { "name": "ra", "path": "value.ofType(string)", "type": "string" } ] } ] } ] },
+      "expect": [
+        { "ic": "sub", "ac": "A1", "ri": "sub", "ra": "A1" },
+        { "ic": "sub", "ac": "A1", "ri": "sub", "ra": "A2" } ]
+    },
+    {
+      "title": "H2 deep navigation through one forced field (recursion-truncated structure)",
+      "description": "repeat:[item] forces `item`; column item.item.linkId.first() navigates two levels through it; the from_json structure types both levels.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
+        { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
+        { "linkId": "g2", "type": "group" } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "deep", "path": "item.item.linkId.first()", "type": "string" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [
+        { "deep": "g1.1", "rl": "g1" }, { "deep": "g1.1", "rl": "g1.1" },
+        { "deep": "g1.1", "rl": "g1.1.1" }, { "deep": "g1.1", "rl": "g2" } ]
+    }
+  ]
+}

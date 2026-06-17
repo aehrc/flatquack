@@ -33,8 +33,12 @@ export function buildQuery(vd, schema, filterByResourceType, verbose, vars, root
 		.filter(w => !!w)
 		.map(w => fhirpathToAst(w, vd.resource, schema, vars));
 
+	// A where path that navigates a repeat-forced field must re-type it inline, exactly like a root
+	// column (issue #35); the staged builder supplies the resource-rooted re-type map. Non-crossing
+	// paths (and the resourceType filter) are unaffected — the map only fires on a forced field.
+	const whereInput = staged.whereRetype ? {_retype: staged.whereRetype} : {};
 	const whereSql = whereAsts.map(w => {
-		const whereSql = astToSql(w);
+		const whereSql = astToSql(w, false, whereInput, "el", "0");
 		if (whereSql.outputType.fhirType.indexOf("boolean") != 0)
 			throw new Error("where path must output a boolean value");
 		return `(${whereSql.sql})`;

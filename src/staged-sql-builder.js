@@ -663,6 +663,23 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	const finalSelect = `SELECT ${order.join(", ")}\nFROM ${result.rel}`;
 	const tail = (ctes.length ? ",\n" + ctes.join(",\n") : "") + "\n" + finalSelect;
 
+	// A `where` path evaluates at the resource root and may navigate a repeat-forced field, so it
+	// needs the same inline re-type a root column gets (issue #35) — otherwise it reads raw JSON and
+	// errors on comparison. `forcedJsonPaths` is fully accumulated now (the root walk is done); build
+	// a root re-type map (resource-rooted path -> from_json cast macro, pooled via castMacroFor) from
+	// the fields the where paths actually navigate, and return it for the caller to thread in.
+	let whereRetype = null;
+	const wherePaths = (vd.where || []).map(w => w.path);
+	if (wherePaths.length && forcedJsonPaths.length) {
+		const structs = forcedFieldStructures(
+			wherePaths.map(p => ({name: "_w", path: p})), vd.resource, [...new Set(forcedJsonPaths)], schema, vars);
+		if (structs.size) {
+			whereRetype = {};
+			for (const [path, struct] of structs)
+				whereRetype[path] = castMacroFor(struct, B.childElemOf(path, rootElem).seed);
+		}
+	}
+
 	return {
 		srcSelect: emitScope.srcSelect,
 		tail,
@@ -670,6 +687,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		resourceKeyAst,
 		withKeyword: viewHasRepeat ? "WITH RECURSIVE" : "WITH",
 		macros: macroDefs.length ? macroDefs.join("\n") + "\n" : "",
-		forcedJsonPaths
+		forcedJsonPaths,
+		whereRetype
 	};
 }
