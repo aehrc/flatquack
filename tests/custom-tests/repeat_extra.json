@@ -99,6 +99,79 @@
         {"id": "qrc", "linkId": "a", "answers": []},
         {"id": "qrc", "linkId": "a.1", "answers": ["x", "y"]}
       ]
+    },
+    {
+      "title": "typed column navigating a repeat-forced field outside unionAll (silent JSON leak)",
+      "description": "Issue #35 latent gap: a root column `item.linkId.first()` (declared string) sits beside a sibling `repeat:[item]`. The repeat forces `item` to JSON[], so the column navigates JSON and — without a union forcing a cast — silently emits a JSON-shaped value into a string column instead of erroring. After the fix the structural array bridge re-types `item`, so `firstLink` is the plain string 'g1' carried across every repeat row.",
+      "resources": [
+        {
+          "resourceType": "Questionnaire", "id": "qf1",
+          "item": [
+            {"linkId": "g1", "type": "group", "item": [{"linkId": "g1.1", "type": "string", "item": [{"linkId": "g1.1.1", "type": "string"}]}]},
+            {"linkId": "g2", "type": "group"}
+          ]
+        }
+      ],
+      "view": {
+        "resource": "Questionnaire",
+        "select": [
+          {"column": [
+            {"name": "id", "path": "id", "type": "id"},
+            {"name": "firstLink", "path": "item.linkId.first()", "type": "string"}
+          ]},
+          {"repeat": ["item"], "column": [{"name": "rlink", "path": "linkId", "type": "string"}]}
+        ]
+      },
+      "expect": [
+        {"id": "qf1", "firstLink": "g1", "rlink": "g1"},
+        {"id": "qf1", "firstLink": "g1", "rlink": "g1.1"},
+        {"id": "qf1", "firstLink": "g1", "rlink": "g1.1.1"},
+        {"id": "qf1", "firstLink": "g1", "rlink": "g2"}
+      ]
+    },
+    {
+      "title": "unionAll bridges repeat-forced field across all branch kinds and declared types",
+      "description": "Issue #35 (generalised): a unionAll over a repeat-forced field (`item`) whose three branches each navigate it differently — a columns-only branch (item.linkId.first()/item.maxLength.first()), a forEach branch (top-level items), and a repeat branch (all items recursively) — and each carries both a string (linkId) and an integer (maxLength) column. The structural array bridge must re-type the forced field for the columns-only and forEach branches so all branches emit VARCHAR/INTEGER and the UNION ALL reconciles (no JSON cast).",
+      "resources": [
+        {
+          "resourceType": "Questionnaire", "id": "qu1",
+          "item": [
+            {"linkId": "g1", "type": "group", "maxLength": 10, "item": [{"linkId": "g1.1", "type": "string", "maxLength": 20}]},
+            {"linkId": "g2", "type": "group", "maxLength": 30}
+          ]
+        }
+      ],
+      "view": {
+        "resource": "Questionnaire",
+        "select": [
+          {"column": [{"name": "id", "path": "id", "type": "id"}]},
+          {"unionAll": [
+            {"column": [
+              {"name": "kind", "path": "'root'", "type": "string"},
+              {"name": "linkId", "path": "item.linkId.first()", "type": "string"},
+              {"name": "maxLen", "path": "item.maxLength.first()", "type": "integer"}
+            ]},
+            {"forEach": "item", "column": [
+              {"name": "kind", "path": "'each'", "type": "string"},
+              {"name": "linkId", "path": "linkId", "type": "string"},
+              {"name": "maxLen", "path": "maxLength", "type": "integer"}
+            ]},
+            {"repeat": ["item"], "column": [
+              {"name": "kind", "path": "'item'", "type": "string"},
+              {"name": "linkId", "path": "linkId", "type": "string"},
+              {"name": "maxLen", "path": "maxLength", "type": "integer"}
+            ]}
+          ]}
+        ]
+      },
+      "expect": [
+        {"id": "qu1", "kind": "root", "linkId": "g1", "maxLen": 10},
+        {"id": "qu1", "kind": "each", "linkId": "g1", "maxLen": 10},
+        {"id": "qu1", "kind": "each", "linkId": "g2", "maxLen": 30},
+        {"id": "qu1", "kind": "item", "linkId": "g1", "maxLen": 10},
+        {"id": "qu1", "kind": "item", "linkId": "g1.1", "maxLen": 20},
+        {"id": "qu1", "kind": "item", "linkId": "g2", "maxLen": 30}
+      ]
     }
   ]
 }

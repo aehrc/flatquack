@@ -1,0 +1,79 @@
+{
+  "title": "repeat_nested_forced_json",
+  "description": "Issue #35 (universal): a multi-segment (dotted) repeat seed (e.g. `answer.item`, the canonical QuestionnaireResponse recursion) forces a field to raw JSON[] at a DEEPER navigation level than the scope element. A typed column navigating that field (`answer.item.linkId...`) must be re-typed at the divergence point, not only at the first segment off the element. The pre-#35-universal builder re-typed only single-segment seeds, so these silently leaked quote-wrapped JSON into typed columns (or threw on UNION ALL reconciliation). Distinct values throughout so the order-independent Set comparison cannot mask a duplicate.",
+  "fhirVersion": ["5.0.0", "4.0.1", "3.0.2"],
+  "tests": [
+    {
+      "title": "typed column navigates a dotted repeat-forced field (chain)",
+      "description": "repeat:[\"item\",\"answer.item\"] under a forEach:item forces both `item` and `answer.item` to JSON[] relative to the item element. The sibling typed column `answer.item.linkId.first()` navigates the dotted forced field — divergence is at the SECOND nav segment. Expected: the declared `string` value 'NESTED', not the quote-wrapped JSON '\"NESTED\"'.",
+      "resources": [
+        {
+          "resourceType": "QuestionnaireResponse", "id": "qr1",
+          "item": [
+            {
+              "linkId": "top",
+              "answer": [ { "valueString": "a1", "item": [ { "linkId": "NESTED" } ] } ],
+              "item": [ { "linkId": "child" } ]
+            }
+          ]
+        }
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          {
+            "forEach": "item",
+            "select": [
+              { "column": [ { "name": "topLink", "path": "linkId", "type": "string" } ] },
+              { "column": [ { "name": "nestedLink", "path": "answer.item.linkId.first()", "type": "string" } ] },
+              { "repeat": ["item", "answer.item"], "column": [ { "name": "rlink", "path": "linkId", "type": "string" } ] }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "topLink": "top", "nestedLink": "NESTED", "rlink": "child" },
+        { "topLink": "top", "nestedLink": "NESTED", "rlink": "NESTED" }
+      ]
+    },
+    {
+      "title": "unionAll bridges a dotted repeat-forced field across a columns-only and a repeat branch",
+      "description": "A unionAll over the item element mixes a columns-only branch navigating the dotted forced field `answer.item.linkId` (aggregated with join() to a value distinct from every per-node value) with a repeat branch whose seed `answer.item` forces it. The columns-only branch must be bridged to the same typed structure so UNION ALL reconciles and emits typed values.",
+      "resources": [
+        {
+          "resourceType": "QuestionnaireResponse", "id": "qr2",
+          "item": [
+            {
+              "linkId": "top",
+              "answer": [
+                { "item": [ { "linkId": "U1" } ] },
+                { "item": [ { "linkId": "U2" } ] }
+              ]
+            }
+          ]
+        }
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          {
+            "forEach": "item",
+            "select": [
+              {
+                "unionAll": [
+                  { "column": [ { "name": "nestedLink", "path": "answer.item.linkId.join('|')", "type": "string" } ] },
+                  { "repeat": ["answer.item"], "column": [ { "name": "nestedLink", "path": "linkId", "type": "string" } ] }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "nestedLink": "U1|U2" },
+        { "nestedLink": "U1" },
+        { "nestedLink": "U2" }
+      ]
+    }
+  ]
+}

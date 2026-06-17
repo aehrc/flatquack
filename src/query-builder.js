@@ -1,6 +1,6 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
 import {astToSql, pathsToSchema} from "./ddb-sql-builder.js"
-import {validateVd, viewPaths, extractPathsFromAst} from "./view-parser.js";
+import {validateVd, viewPaths, extractPathsFromAst, navigatePathTree} from "./view-parser.js";
 import {buildStagedQuery} from "./staged-sql-builder.js";
 import macros from "../templates/duck-macros.js";
 
@@ -10,15 +10,10 @@ import macros from "../templates/duck-macros.js";
 // re-enters `WITH RECURSIVE`; its body is evaluated typed through a from_json bridge instead.
 function applyForcedJson(tree, paths) {
 	(paths || []).forEach(pathStr => {
-		let level = tree, node = null, matched = true;
-		for (const seg of pathStr.split(".")) {
-			node = level.find(n => n.value === seg);
-			if (!node) { matched = false; break; }
-			level = node.children;
-		}
-		// Only force-JSON when the FULL path resolved: a partial match leaves `node` pointing at a
-		// shallower ancestor, and truncating that would corrupt a typed sibling's read schema.
-		if (matched && node) { node.forceJson = true; node.children = []; }
+		// Only force-JSON when the FULL path resolves: a partial match would point at a shallower
+		// ancestor, and truncating that would corrupt a typed sibling's read schema.
+		const node = navigatePathTree(tree, pathStr);
+		if (node) { node.forceJson = true; node.children = []; }
 	});
 }
 
@@ -33,8 +28,12 @@ export function buildQuery(vd, schema, filterByResourceType, verbose, vars, root
 		.filter(w => !!w)
 		.map(w => fhirpathToAst(w, vd.resource, schema, vars));
 
+	// A where path that navigates a repeat-forced field must re-type it inline, exactly like a root
+	// column (issue #35); the staged builder supplies the resource-rooted re-type map. Non-crossing
+	// paths (and the resourceType filter) are unaffected — the map only fires on a forced field.
+	const whereInput = staged.whereRetype ? {_retype: staged.whereRetype} : {};
 	const whereSql = whereAsts.map(w => {
-		const whereSql = astToSql(w);
+		const whereSql = astToSql(w, false, whereInput, "el", "0");
 		if (whereSql.outputType.fhirType.indexOf("boolean") != 0)
 			throw new Error("where path must output a boolean value");
 		return `(${whereSql.sql})`;

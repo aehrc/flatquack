@@ -1,6 +1,7 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
 import {astToSql} from "./ddb-sql-builder.js";
-import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf} from "./repeat-lowering.js";
+import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf, forcedFieldStructures} from "./repeat-lowering.js";
+import {collectColumnNames} from "./view-parser.js";
 
 // Staged-CTE emitter (SPEC_hybrid). Walks the ViewDefinition tree, classifies each
 // scope CHAIN (<=1 fan-out) or FORK (>=2), and emits staged CTEs. Leaves are compiled
@@ -52,6 +53,24 @@ function collectScope(node) {
 	});
 	if (node.unionAll) fanouts.push({type: "union", node});
 	return {columns, fanouts};
+}
+
+// Repeat seed paths declared by any repeat branch anywhere in a unionAll tree. A repeat branch
+// forces its seed field to JSON[] for the whole union scope, so a sibling columns-only / forEach
+// branch navigating the same field must be bridged too (issue #35).
+function unionRepeatSeeds(branches) {
+	return branches.flatMap(b =>
+		b.repeat ? b.repeat : b.unionAll ? unionRepeatSeeds(b.unionAll) : []);
+}
+
+// Columns of every non-iterating (columns-only) branch in a unionAll tree. These compile against
+// the union's parent element, so they navigate forced fields exactly as the scope's own columns do
+// and must feed the same re-type structure derivation.
+function unionColumnsOnlyCols(branches) {
+	return branches.flatMap(b =>
+		b.unionAll ? unionColumnsOnlyCols(b.unionAll)
+		: (b.repeat || b.forEach || b.forEachOrNull) ? []
+		: (b.column || []));
 }
 
 // Does this scope (or any descendant) contain a fork (>=2 fan-out children)?
@@ -128,12 +147,9 @@ function astHasRowIndex(node) {
 	return false;
 }
 
-// VD column names in document (tree) order — the output projection contract.
+// VD column names in document (tree) order, deduped — the output projection contract.
 function columnOrder(node) {
-	let names = [];
-	(node.column || []).forEach(c => names.push(c.name));
-	(node.select || []).forEach(ch => names.push(...columnOrder(ch)));
-	if (node.unionAll) names.push(...columnOrder(node.unionAll[0]));
+	const names = collectColumnNames(node);
 	return names.filter((n, i) => names.indexOf(n) === i);
 }
 
@@ -150,11 +166,15 @@ export function makeBuilder(schema, vars) {
 		return {sql: out.sql, outputType: out.outputType, type: ast.type};
 	}
 
-	function compileColumn(col, elem) {
+	// `retype` (field name -> from_json cast macro), when present, re-types fields a sibling `repeat`
+	// forced to raw JSON[] so a column navigating them yields its declared type (issue #35). It rides
+	// on the element's inputType so the leaf engine wraps only the first nav off the element.
+	function compileColumn(col, elem, retype) {
 		const pathExpr = col.path || col.name;
 		const fpStr = `_col${col.collection ? "_collection" : ""}('${col.name}', ${pathExpr})`;
 		const ast = fhirpathToAst(fpStr, elem.seed, schema, vars);
-		const out = astToSql(ast, elem.inLambda, elem.inputType, elem.ref || "el", elem.rowIndexSql);
+		const inputType = retype ? {...elem.inputType, _retype: retype} : elem.inputType;
+		const out = astToSql(ast, elem.inLambda, inputType, elem.ref || "el", elem.rowIndexSql);
 		const expr = out.sql.replace(new RegExp(`^'${col.name}':\\s*`), "");
 		return {name: col.name, expr, sql: `${expr} AS ${col.name}`};
 	}
@@ -232,6 +252,16 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		return nm;
 	}
 
+	// A forced-field-structures map (relative path -> typed STRUCT) lowered to an inline re-type map
+	// (relative path -> from_json cast macro), keyed off `elem` so the cast applies at the right depth.
+	// Shared by the per-scope column re-type (issue #35) and the resource-root where-path re-type.
+	function buildRetypeMap(structs, elem) {
+		const map = {};
+		for (const [path, struct] of structs)
+			map[path] = castMacroFor(struct, B.childElemOf(path, elem).seed);
+		return map;
+	}
+
 	// Repeat seed fields that must be forced to JSON[] in the typed read schema even when a
 	// sibling navigation would otherwise type them ("repeat wins").
 	const forcedJsonPaths = [];
@@ -270,8 +300,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		scopeMentionsRowIndex(node, c => astHasRowIndex(fhirpathToAst(c.path || c.name, elem.seed, schema, vars)));
 
 	// Prepare a repeat fan-out: validate its paths, resolve the descent element type, and
-	// materialise the seed array into the owning stage's projection.
-	function prepRepeat(f, elem, schemaPrefix, stageSelect) {
+	// materialise the seed array into the owning stage's projection. The seed fields are forced to
+	// JSON[] in the read schema by `emitScope` (the single place that does so), not here.
+	function prepRepeat(f, elem, stageSelect) {
 		f.listedPaths = f.node.repeat;
 		f.listedPaths.forEach(assertSimplePath);
 		f.childElem = B.childElemOf(f.listedPaths[0], elem);
@@ -280,9 +311,6 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		// Does the repeat body bind `%rowIndex`? Parse against the typed bridge element it will be
 		// evaluated under — drives the pre-order path + window in `emitRepeat` (Stage 4).
 		f.usesRowIndex = scopeUsesRowIndex(f.node, bridgeElem(f.childElem.seed));
-		// A seed field read in a typed scope must be JSON[] even if a sibling forEach types it.
-		if (schemaPrefix) f.listedPaths.forEach(p =>
-			forcedJsonPaths.push([...schemaPrefix, ...p.split(".")].join(".")));
 	}
 
 	// Emit a repeat's JSON descent + typed bridge, then continue the body scope on the typed
@@ -381,8 +409,6 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	// is the resource-rooted field path used to mark forced-JSON repeat seeds. Returns {rel, cols}.
 	function emitScope(scopeNode, elem, carried, keyCols, fromSql, isRoot, schemaPrefix) {
 		const {columns, fanouts} = collectScope(scopeNode);
-		const colProjs = columns.map(c => B.compileColumn(c, elem));
-		const carriedAfter = [...carried, ...colProjs.map(c => c.name)];
 
 		const realFanouts = fanouts.filter(f => f.type === "each");
 		const repeatFanouts = fanouts.filter(f => f.type === "repeat");
@@ -393,6 +419,38 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		// from_json bridge rather than as a typed struct array (shared-field case).
 		const repeatSeedFields = new Set(repeatFanouts.flatMap(f => f.node.repeat));
 		realFanouts.forEach(f => { f.jsonMode = repeatSeedFields.has(f.node.forEach || f.node.forEachOrNull); });
+
+		// Fields forced to raw JSON[] at THIS element by any sibling `repeat` — its own repeat
+		// fan-outs plus any repeat branch inside a sibling unionAll (which shares this element).
+		// Relative dot paths off the element; may be multi-segment (e.g. `answer.item`, a
+		// QuestionnaireResponse recursion seed). This ONE set drives both the read schema and the
+		// inline re-type, so the two can never disagree about which fields are physically JSON.
+		const forcedSeeds = new Set([
+			...repeatSeedFields,
+			...unionFanouts.flatMap(f => unionRepeatSeeds(f.node.unionAll))
+		]);
+
+		// "repeat wins": force each seed field to JSON[] in the typed read schema. Gated on the typed
+		// spine (schemaPrefix set) — fork/repeat-body scopes read materialised arrays, not source
+		// columns, so they neither force the schema nor re-type. This is the sole place seeds are
+		// pushed (prepRepeat no longer does), keeping `forcedJsonPaths` the single source of truth.
+		if (schemaPrefix) forcedSeeds.forEach(p =>
+			forcedJsonPaths.push([...schemaPrefix, ...p.split(".")].join(".")));
+
+		// A column navigating a forced field would emit JSON into its declared type; re-type it inline
+		// at the navigation step (issue #35). The cast macro is keyed by the path RELATIVE to the
+		// element, so the leaf engine applies it at the exact divergence depth — multi-segment seeds
+		// included. Fields no column navigates yield no structure, so a scope with no such column
+		// compiles byte-for-byte as before (retypeMap stays null).
+		let retypeMap = null;
+		if (schemaPrefix && forcedSeeds.size) {
+			const navCols = [...columns, ...unionFanouts.flatMap(f => unionColumnsOnlyCols(f.node.unionAll))];
+			const structs = forcedFieldStructures(navCols, elem.seed, [...forcedSeeds], schema, vars);
+			if (structs.size) retypeMap = buildRetypeMap(structs, elem);
+		}
+
+		const colProjs = columns.map(c => B.compileColumn(c, elem, retypeMap));
+		const carriedAfter = [...carried, ...colProjs.map(c => c.name)];
 
 		// the root stage defines the resource key; deeper stages carry it forward
 		const keyProj = isRoot
@@ -416,10 +474,10 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			stageSelect.push(`${arrSql} AS ${f.arrCol}`);
 		});
 		// materialise each repeat's seed array (the JSON descent reads from it)
-		repeatFanouts.forEach(f => prepRepeat(f, elem, schemaPrefix, stageSelect));
+		repeatFanouts.forEach(f => prepRepeat(f, elem, stageSelect));
 		// materialise arrays needed by unionAll branches
 		unionFanouts.forEach(f => {
-			f.prepared = prepUnion(f.node.unionAll, elem, stageSelect, schemaPrefix);
+			f.prepared = prepUnion(f.node.unionAll, elem, stageSelect, retypeMap, forcedSeeds);
 		});
 
 		let relName;
@@ -524,25 +582,31 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	// --- unionAll ----------------------------------------------------------
 	// prepUnion materialises each branch's forEach array (or repeat seed) into the owning
 	// stage and returns a tree describing how to emit the branch pipelines.
-	function prepUnion(unionBranches, elem, stageSelect, schemaPrefix) {
+	// `retype` re-types forced-JSON fields for columns-only branches (they share the union's parent
+	// element, issue #35); `forcedSeeds` is the set of fields a sibling repeat forces, used to route a
+	// forEach branch over such a field through the from_json bridge (jsonMode), like emitScope does.
+	function prepUnion(unionBranches, elem, stageSelect, retype, forcedSeeds) {
 		return unionBranches.map(b => {
-			if (b.unionAll) return {nested: prepUnion(b.unionAll, elem, stageSelect, schemaPrefix)};
+			if (b.unionAll) return {nested: prepUnion(b.unionAll, elem, stageSelect, retype, forcedSeeds)};
 			if (b.repeat) {
 				const f = {node: b};
-				prepRepeat(f, elem, schemaPrefix, stageSelect);
+				prepRepeat(f, elem, stageSelect);
 				return {repeat: f};
 			}
 			if (b.forEach || b.forEachOrNull) {
 				const path = b.forEach || b.forEachOrNull;
+				const jsonMode = !!(forcedSeeds && forcedSeeds.has(path));
+				// A forEach branch over a repeat-forced field is bridged in emitUnion (jsonMode); its
+				// element array is still materialised here so the bridge can unnest it.
 				const {arrSql, childElem} = B.prepareFanout(path, elem);
 				const arrCol = name("u") + "_arr";
 				stageSelect.push(`${arrSql} AS ${arrCol}`);
-				return {node: b, arrCol, orNull: !!b.forEachOrNull, childElem};
+				return {node: b, arrCol, orNull: !!b.forEachOrNull, childElem, jsonMode};
 			}
 			// columns only (no iteration): materialise each column expr in the stage
 			// (the scope element is available there but not carried downstream)
 			const cols = (b.column || []).map(c => {
-				const {expr, name: cn} = B.compileColumn(c, elem);
+				const {expr, name: cn} = B.compileColumn(c, elem, retype);
 				const matcol = name("uc") + "_" + cn;
 				stageSelect.push(`${expr} AS ${matcol}`);
 				return {name: cn, matcol};
@@ -554,24 +618,34 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	function emitUnion(prepared, relName, carried, keyCols) {
 		const parts = [];
 		let cols = null;
+		// A bridged branch (a repeat's JSON descent, or a forEach over a repeat-forced field) selects
+		// its body columns — keyed and carried — from the relation the bridge produced.
+		const pushBridged = (br) => {
+			const bodyCols = br.cols.slice(carried.length);
+			cols = cols || bodyCols;
+			parts.push(`SELECT ${[...keyCols, ...carried, ...bodyCols].join(", ")} FROM ${br.rel}`);
+		};
 		const collect = (entries, srcRel) => {
 			entries.forEach(e => {
 				if (e.nested) { collect(e.nested, srcRel); return; }
 				if (e.repeat) {
 					// a repeat branch: descend in JSON, then select its body columns keyed/carried
-					const br = emitRepeat(e.repeat, srcRel, carried, keyCols);
-					const bodyCols = br.cols.slice(carried.length);
-					cols = cols || bodyCols;
-					const sel = [...keyCols, ...carried, ...bodyCols];
-					parts.push(`SELECT ${sel.join(", ")} FROM ${br.rel}`);
+					pushBridged(emitRepeat(e.repeat, srcRel, carried, keyCols));
 				} else if (e.arrCol) {
-					// Each iterating unionAll branch gets its own `%rowIndex` ordinal (resets per
-					// branch), exactly like a forEach/forEachOrNull elsewhere.
-					const join = unnestFrom(srcRel, e, name("rn"));
-					const colProjs = (e.node.column || []).map(c => B.compileColumn(c, e.childElem));
-					cols = cols || colProjs.map(c => c.name);
-					const sel = [...keyCols, ...carried, ...colProjs.map(c => c.sql)];
-					parts.push(`SELECT ${sel.join(", ")} FROM ${join}`);
+					if (e.jsonMode) {
+						// forEach branch over a repeat-forced field: consume each element through the same
+						// from_json typed bridge a sibling forEach/repeat uses, so its columns share the
+						// repeat branch's physical types and the UNION ALL reconciles (issue #35).
+						pushBridged(emitJsonEach(e, srcRel, carried, keyCols, null));
+					} else {
+						// Each iterating unionAll branch gets its own `%rowIndex` ordinal (resets per
+						// branch), exactly like a forEach/forEachOrNull elsewhere.
+						const join = unnestFrom(srcRel, e, name("rn"));
+						const colProjs = (e.node.column || []).map(c => B.compileColumn(c, e.childElem));
+						cols = cols || colProjs.map(c => c.name);
+						const sel = [...keyCols, ...carried, ...colProjs.map(c => c.sql)];
+						parts.push(`SELECT ${sel.join(", ")} FROM ${join}`);
+					}
 				} else {
 					// columns-only branch: select the stage-materialised column values
 					cols = cols || e.cols.map(c => c.name);
@@ -593,6 +667,19 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	const finalSelect = `SELECT ${order.join(", ")}\nFROM ${result.rel}`;
 	const tail = (ctes.length ? ",\n" + ctes.join(",\n") : "") + "\n" + finalSelect;
 
+	// A `where` path evaluates at the resource root and may navigate a repeat-forced field, so it
+	// needs the same inline re-type a root column gets (issue #35) — otherwise it reads raw JSON and
+	// errors on comparison. `forcedJsonPaths` is fully accumulated now (the root walk is done); build
+	// a root re-type map (resource-rooted path -> from_json cast macro, pooled via castMacroFor) from
+	// the fields the where paths actually navigate, and return it for the caller to thread in.
+	let whereRetype = null;
+	const wherePaths = (vd.where || []).map(w => w.path);
+	if (wherePaths.length && forcedJsonPaths.length) {
+		const structs = forcedFieldStructures(
+			wherePaths.map(p => ({name: "_w", path: p})), vd.resource, [...new Set(forcedJsonPaths)], schema, vars);
+		if (structs.size) whereRetype = buildRetypeMap(structs, rootElem);
+	}
+
 	return {
 		srcSelect: emitScope.srcSelect,
 		tail,
@@ -600,6 +687,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		resourceKeyAst,
 		withKeyword: viewHasRepeat ? "WITH RECURSIVE" : "WITH",
 		macros: macroDefs.length ? macroDefs.join("\n") + "\n" : "",
-		forcedJsonPaths
+		forcedJsonPaths,
+		whereRetype
 	};
 }

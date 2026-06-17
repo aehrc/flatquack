@@ -1,6 +1,6 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
 import {pathsToJsonStruct} from "./ddb-sql-builder.js";
-import {extractPathsFromAst, viewPaths} from "./view-parser.js";
+import {extractPathsFromAst, viewPaths, navigatePathTree} from "./view-parser.js";
 
 // Backend-agnostic `repeat` lowering helpers for the staged (`WITH RECURSIVE`) emitter. A
 // `repeat` descends ONLY its listed paths, recursively, excluding the seed; the descent runs in
@@ -63,6 +63,28 @@ export function repeatStructure(repeatNode, elemSchemaPath, schema, vars) {
 	const tree = extractPathsFromAst({asts: [ast]});
 	if (!tree.length) return "{}";
 	return pathsToJsonStruct(tree);
+}
+
+// The `from_json` element structures for forced-JSON fields a scope's columns navigate (issue #35).
+// When a sibling `repeat` forces a field (e.g. `item`, or the multi-segment `answer.item` of a
+// QuestionnaireResponse recursion) to raw JSON[], a column navigating it (`answer.item.linkId.first()`)
+// would emit JSON into its declared type. We re-type that field to a typed STRUCT element so
+// navigation yields typed values — the inline form of the repeat/forEach bridge. For each forced path
+// actually navigated by `columns` (rooted at `elemSeed`), returns the typed element structure of the
+// leaves under it, keyed by the SAME relative dot path; recursive/forced subtrees stay raw JSON via
+// `pathsToJsonStruct`, and from_json keeps only the listed keys. Paths not navigated are omitted.
+export function forcedFieldStructures(columns, elemSeed, forcedFields, schema, vars) {
+	if (!columns.length || !forcedFields.length) return new Map();
+	const ast = fhirpathToAst(viewPaths({column: columns}), elemSeed, schema, vars);
+	const tree = extractPathsFromAst({asts: [ast]});
+	const out = new Map();
+	forcedFields.forEach(field => {
+		// Descend the navigation tree to the (possibly nested) forced field.
+		const node = navigatePathTree(tree, field);
+		if (node && node.children && node.children.length)
+			out.set(field, pathsToJsonStruct(node.children));
+	});
+	return out;
 }
 
 // The element produced by iterating `pathStr` from `elem`. `B` exposes `compilePath`.

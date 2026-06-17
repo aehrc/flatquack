@@ -65,23 +65,26 @@ export function validateVd(vd) {
 	//nested elements
 	validateElement(vd);
 
-	// Column names must be unique across the whole view (SQL-on-FHIR §column.name). The output
-	// projection collects every column in tree order, treating a transparent nested select as part
-	// of its parent and a unionAll as contributing its (name-matched) branches once — mirror that
-	// here so a name reused across sibling scopes is rejected up front. Without this, the staged
-	// emitter would emit two same-named columns into a CTE; DuckDB silently keeps the first and the
-	// other column's values are dropped with no error.
-	function collectColumnNames(node) {
-		const names = [];
-		(node.column || []).forEach(c => names.push(c.name));
-		(node.select || []).forEach(child => names.push(...collectColumnNames(child)));
-		if (node.unionAll) names.push(...collectColumnNames(node.unionAll[0]));
-		return names;
-	}
+	// Column names must be unique across the whole view (SQL-on-FHIR §column.name). Without this, the
+	// staged emitter would emit two same-named columns into a CTE; DuckDB silently keeps the first and
+	// the other column's values are dropped with no error.
 	const names = collectColumnNames(vd);
-	const duplicate = names.find((n, i) => names.indexOf(n) !== i);
+	const seen = new Set();
+	const duplicate = names.find(n => seen.has(n) || (seen.add(n), false));
 	if (duplicate)
 		throw new Error(`duplicate column name '${duplicate}' - column names must be unique across a view`);
+}
+
+// Every column name a ViewDefinition projects, in document (tree) order: a transparent nested
+// select contributes as part of its parent, and a unionAll contributes its (name-matched) branches
+// once. This is the output projection contract — shared by validation (which detects duplicates)
+// and the staged emitter's column ordering (which dedups).
+export function collectColumnNames(node) {
+	const names = [];
+	(node.column || []).forEach(c => names.push(c.name));
+	(node.select || []).forEach(child => names.push(...collectColumnNames(child)));
+	if (node.unionAll) names.push(...collectColumnNames(node.unionAll[0]));
+	return names;
 }
 
 // Build a single resource-rooted FHIRPath expression that nests every navigation a
@@ -153,4 +156,17 @@ export function extractPathsFromAst(node) {
 
 	extractPaths(node);
 	return paths;
+}
+
+// Walk a path-tree (an `extractPathsFromAst` result: `{value, children}` nodes) along a
+// dot-separated path. Returns the terminal node only when the FULL path resolves, else null — a
+// partial match must not be treated as a hit (it points at a shallower ancestor).
+export function navigatePathTree(tree, dotPath) {
+	let level = tree, node = null;
+	for (const seg of dotPath.split(".")) {
+		node = level && level.find(n => n.value === seg);
+		if (!node) return null;
+		level = node.children;
+	}
+	return node;
 }
