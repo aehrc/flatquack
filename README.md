@@ -127,7 +127,7 @@ Use the `--macros` parameter to load macro files when running FlatQuack. This pa
 - **Multiple sources**: Repeat the parameter to load from multiple locations
 
 ## Generating a FHIR Schema
-The schema for FHIR R4 is included with FlatQuack, but you may want to execute ViewDefinition files against other FHIR versions as well. To do this you can generate schema files for those version and pass them in with the `--schema-file` command line argument.
+The schema for FHIR R4 (`schemas/fhir-schema-r4.json`) is used by default. A FHIR R5 schema (`schemas/fhir-schema-r5.json`) is also bundled — to run ViewDefinitions against R5 data, pass it with `--schema-file schemas/fhir-schema-r5.json`. To execute ViewDefinition files against any other FHIR version, you can generate a schema file for that version and pass it in with the `--schema-file` command line argument.
 
 To generate a schema:
 1. Download and decompress the FHIR definitions in JSON format from `https://hl7.org/fhir/downloads.html` (or the corresponding URL for the FHIR version you want to use).

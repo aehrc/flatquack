@@ -331,7 +331,9 @@ export function pathsToSchema(node, isInRoot=true) {
 			? `STRUCT(${node.children.map(c => pathsToSchema(c, false)).join(", ")})${arrayIndicator}`
 			: `${leafSqlType(node)}${arrayIndicator}`;
 	}
-	return isInRoot ? `${node.value}: '${sqlType}'` : `${node.value} ${sqlType}`
+	// Always double-quote the identifier so FHIR field names that are DuckDB
+	// reserved words (e.g. `end` from Period) produce a valid type spec (issue #10).
+	return isInRoot ? `"${node.value}": '${sqlType}'` : `"${node.value}" ${sqlType}`
 };
 
 // Render a path tree as a `from_json` structure (the JSON-object form `from_json` accepts:
