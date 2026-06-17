@@ -42,6 +42,7 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 | `--var` | | | `name=value` pair of FHIRPath variables for use in ViewDefinition expressions (referenced as `%name`). This argument may be repeated. | 
 | `--root-key` | | `natural` | Recombination key used when a `select` has two or more independent fan-out children (a fork). `natural` uses the resource key (`getResourceKey()`); `uuid` synthesises a per-resource key. Both produce identical results; see [`specs/SPEC_hybrid.md`](specs/SPEC_hybrid.md). |
 | `--verbose` | | false | Print debugging information to the console when running FlatQuack. |
+| `--strict` | | false | Reject unsupported/unknown directives on a `select` element (e.g. `repeat`) instead of silently ignoring them. Note: this only validates `select`-element directives — it does not check column-level keys or root-level ViewDefinition keys, so it is not a full schema validation. |
 
 #### Modes (--mode parameter)
 | name | description |

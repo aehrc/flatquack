@@ -35,3 +35,66 @@ describe("view-parser - column name validation", () => {
 		expect(() => validateVd(view)).not.toThrow();
 	});
 });
+
+// Strict-mode validation (fix/16): an unknown select directive is silently ignored by default,
+// producing a valid-but-wrong query; strict mode (2nd arg) rejects it by name. Migrated from the
+// retired view.test.js and adapted — `repeat` is now an IMPLEMENTED directive in this branch, so
+// the "unknown directive" example uses `bogus`, and a dedicated test confirms `repeat` is accepted.
+describe("view-parser - strict directive validation", () => {
+	const bogusView = {
+		resource: "QuestionnaireResponse",
+		select: [
+			{column: [{path: "getResourceKey()", name: "id"}]},
+			{bogus: ["item"], column: [{path: "linkId", name: "item_link_id"}]}
+		]
+	};
+
+	test("strict mode rejects an unknown select directive", () => {
+		expect(() => validateVd(bogusView, true)).toThrow(/bogus/);
+	});
+
+	test("non-strict mode (default) ignores an unknown select directive", () => {
+		expect(() => validateVd(bogusView)).not.toThrow();
+	});
+
+	test("strict mode accepts a view using only known directives", () => {
+		const validView = {
+			resource: "Patient",
+			select: [{forEach: "name", column: [{name: "family"}]}]
+		};
+		expect(() => validateVd(validView, true)).not.toThrow();
+	});
+
+	test("strict mode accepts the implemented `repeat` directive", () => {
+		const repeatView = {
+			resource: "QuestionnaireResponse",
+			select: [{repeat: ["item"], column: [{path: "linkId", name: "item_link_id"}]}]
+		};
+		expect(() => validateVd(repeatView, true)).not.toThrow();
+	});
+
+	// Strict validation is scoped to select-element directives: root-level ViewDefinition keys
+	// (resource, name, where, ...) must not be rejected.
+	test("strict mode does not reject root-level ViewDefinition keys", () => {
+		const view = {
+			resource: "Patient",
+			name: "patient_names",
+			where: [{path: "active = true"}],
+			select: [{column: [{name: "family", path: "name.family"}]}]
+		};
+		expect(() => validateVd(view, true)).not.toThrow();
+	});
+
+	// The strict check must recurse into unionAll (and nested select) elements.
+	test("strict mode rejects an unknown directive inside unionAll", () => {
+		const view = {
+			resource: "Patient",
+			select: [{
+				unionAll: [
+					{bogus: ["x"], column: [{name: "family", path: "name.family"}]}
+				]
+			}]
+		};
+		expect(() => validateVd(view, true)).toThrow(/bogus/);
+	});
+});

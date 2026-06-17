@@ -1,15 +1,26 @@
-//a few quick validation checks
-export function validateVd(vd) {
-	
+//the directives a `select` element may contain (SQL-on-FHIR ViewDefinition).
+//`repeat` is flatquack's recursive-descent directive (implemented here, see staged-sql-builder),
+//so strict mode must treat it as known.
+const SELECT_KEYS = ["column", "select", "forEach", "forEachOrNull", "unionAll", "repeat"];
+
+//a few quick validation checks. When `strict` is true, unrecognized directives
+//on a select element are rejected rather than silently ignored.
+export function validateVd(vd, strict) {
+
 	function findSelect(node) {
-		if (node.select) 
+		if (node.select)
 				return true;
 		if (node.unionAll || Array.isArray(node))
 			return (node.unionAll||node).find(findSelect)
 	}
 
-	function validateElement(node) {
+	function validateElement(node, isSelect) {
 		let output = [];
+		if (strict && isSelect) {
+			const unknown = Object.keys(node).find(k => !SELECT_KEYS.includes(k));
+			if (unknown)
+				throw new Error(`unsupported select directive: '${unknown}'`);
+		}
 		if (node.forEach || node.forEachOrNull) {
 			if (node.forEach && typeof(node.forEach) != "string")
 				throw new Error("forEach elements must be a string");
@@ -25,7 +36,7 @@ export function validateVd(vd) {
 		if (node.select) {
 			if (!Array.isArray(node.select))
 				throw new Error("select elements must be an array");
-			output.push( node.select.map(validateElement) );
+			output.push( node.select.map(n => validateElement(n, true)) );
 		}
 
 		if (node.column) {
@@ -43,7 +54,7 @@ export function validateVd(vd) {
 				throw new Error("unionAll elements must be an array");
 			if (findSelect(node.unionAll))
 				throw new Error("Not implemented - nested select in unionAll");
-			const unionItems = node.unionAll.map(u => validateElement(u).flat(Infinity))
+			const unionItems = node.unionAll.map(u => validateElement(u, true).flat(Infinity))
 			const first = JSON.stringify(unionItems[0]);
 			const error = unionItems.slice(1).find(uc => JSON.stringify(uc) != first);
 			if (error) throw new Error("columns in unionAll elements must have matching names");

@@ -17,8 +17,8 @@ function applyForcedJson(tree, paths) {
 	});
 }
 
-export function buildQuery(vd, schema, filterByResourceType, verbose, vars, rootKey="natural") {
-	validateVd(vd);
+export function buildQuery(vd, schema, filterByResourceType, verbose, vars, rootKey="natural", strict=false) {
+	validateVd(vd, strict);
 
 	const staged = buildStagedQuery(vd, schema, vars, {rootKey});
 	if (verbose) console.log(staged.tail);
@@ -53,13 +53,13 @@ export function buildQuery(vd, schema, filterByResourceType, verbose, vars, root
 }
 
 //TODO: consider replacing this with a full template language
-export function templateToQuery(vd, schema, template, args=[], verbose, filterByResourceType, customMacros=null, vars=null, rootKey="natural") {
+export function templateToQuery(vd, schema, template, args=[], verbose, filterByResourceType, customMacros=null, vars=null, rootKey="natural", strict=false) {
 	//Setting filterByResourceType to btrue can only be used if the schema for the
 	//elements being use is compatible between all of the resources being read
 	//(e.g., element with the same names have the same structure). This is used
 	//in some of the tests that mix resource types.
 
-	const queryParts = buildQuery(vd, schema, filterByResourceType, verbose, vars, rootKey);
+	const queryParts = buildQuery(vd, schema, filterByResourceType, verbose, vars, rootKey, strict);
 	const whereSql = queryParts.whereSql ? "WHERE " + queryParts.whereSql : "";
 	const schemaSql = queryParts.schemaSql ? `, columns=${queryParts.schemaSql}` : "";
 
