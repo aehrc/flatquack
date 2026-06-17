@@ -1,6 +1,6 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
 import {astToSql, pathsToSchema} from "./ddb-sql-builder.js"
-import {validateVd, viewPaths, extractPathsFromAst} from "./view-parser.js";
+import {validateVd, viewPaths, extractPathsFromAst, navigatePathTree} from "./view-parser.js";
 import {buildStagedQuery} from "./staged-sql-builder.js";
 import macros from "../templates/duck-macros.js";
 
@@ -10,15 +10,10 @@ import macros from "../templates/duck-macros.js";
 // re-enters `WITH RECURSIVE`; its body is evaluated typed through a from_json bridge instead.
 function applyForcedJson(tree, paths) {
 	(paths || []).forEach(pathStr => {
-		let level = tree, node = null, matched = true;
-		for (const seg of pathStr.split(".")) {
-			node = level.find(n => n.value === seg);
-			if (!node) { matched = false; break; }
-			level = node.children;
-		}
-		// Only force-JSON when the FULL path resolved: a partial match leaves `node` pointing at a
-		// shallower ancestor, and truncating that would corrupt a typed sibling's read schema.
-		if (matched && node) { node.forceJson = true; node.children = []; }
+		// Only force-JSON when the FULL path resolves: a partial match would point at a shallower
+		// ancestor, and truncating that would corrupt a typed sibling's read schema.
+		const node = navigatePathTree(tree, pathStr);
+		if (node) { node.forceJson = true; node.children = []; }
 	});
 }
 

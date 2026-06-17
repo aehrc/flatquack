@@ -1,6 +1,6 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
 import {pathsToJsonStruct} from "./ddb-sql-builder.js";
-import {extractPathsFromAst, viewPaths} from "./view-parser.js";
+import {extractPathsFromAst, viewPaths, navigatePathTree} from "./view-parser.js";
 
 // Backend-agnostic `repeat` lowering helpers for the staged (`WITH RECURSIVE`) emitter. A
 // `repeat` descends ONLY its listed paths, recursively, excluding the seed; the descent runs in
@@ -79,13 +79,8 @@ export function forcedFieldStructures(columns, elemSeed, forcedFields, schema, v
 	const tree = extractPathsFromAst({asts: [ast]});
 	const out = new Map();
 	forcedFields.forEach(field => {
-		// Descend the navigation tree segment by segment to the (possibly nested) forced field.
-		let level = tree, node = null;
-		for (const seg of field.split(".")) {
-			node = level && level.find(n => n.value === seg);
-			if (!node) break;
-			level = node.children;
-		}
+		// Descend the navigation tree to the (possibly nested) forced field.
+		const node = navigatePathTree(tree, field);
 		if (node && node.children && node.children.length)
 			out.set(field, pathsToJsonStruct(node.children));
 	});

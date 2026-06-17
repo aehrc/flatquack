@@ -1,6 +1,7 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
 import {astToSql} from "./ddb-sql-builder.js";
 import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf, forcedFieldStructures} from "./repeat-lowering.js";
+import {collectColumnNames} from "./view-parser.js";
 
 // Staged-CTE emitter (SPEC_hybrid). Walks the ViewDefinition tree, classifies each
 // scope CHAIN (<=1 fan-out) or FORK (>=2), and emits staged CTEs. Leaves are compiled
@@ -146,12 +147,9 @@ function astHasRowIndex(node) {
 	return false;
 }
 
-// VD column names in document (tree) order — the output projection contract.
+// VD column names in document (tree) order, deduped — the output projection contract.
 function columnOrder(node) {
-	let names = [];
-	(node.column || []).forEach(c => names.push(c.name));
-	(node.select || []).forEach(ch => names.push(...columnOrder(ch)));
-	if (node.unionAll) names.push(...columnOrder(node.unionAll[0]));
+	const names = collectColumnNames(node);
 	return names.filter((n, i) => names.indexOf(n) === i);
 }
 
@@ -252,6 +250,16 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		macroByStructure.set(structure, nm);
 		macroDefs.push(`CREATE OR REPLACE MACRO ${nm}(j) AS from_json(j, '${structure}');`);
 		return nm;
+	}
+
+	// A forced-field-structures map (relative path -> typed STRUCT) lowered to an inline re-type map
+	// (relative path -> from_json cast macro), keyed off `elem` so the cast applies at the right depth.
+	// Shared by the per-scope column re-type (issue #35) and the resource-root where-path re-type.
+	function buildRetypeMap(structs, elem) {
+		const map = {};
+		for (const [path, struct] of structs)
+			map[path] = castMacroFor(struct, B.childElemOf(path, elem).seed);
+		return map;
 	}
 
 	// Repeat seed fields that must be forced to JSON[] in the typed read schema even when a
@@ -438,11 +446,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		if (schemaPrefix && forcedSeeds.size) {
 			const navCols = [...columns, ...unionFanouts.flatMap(f => unionColumnsOnlyCols(f.node.unionAll))];
 			const structs = forcedFieldStructures(navCols, elem.seed, [...forcedSeeds], schema, vars);
-			if (structs.size) {
-				retypeMap = {};
-				for (const [path, struct] of structs)
-					retypeMap[path] = castMacroFor(struct, B.childElemOf(path, elem).seed);
-			}
+			if (structs.size) retypeMap = buildRetypeMap(structs, elem);
 		}
 
 		const colProjs = columns.map(c => B.compileColumn(c, elem, retypeMap));
@@ -673,11 +677,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	if (wherePaths.length && forcedJsonPaths.length) {
 		const structs = forcedFieldStructures(
 			wherePaths.map(p => ({name: "_w", path: p})), vd.resource, [...new Set(forcedJsonPaths)], schema, vars);
-		if (structs.size) {
-			whereRetype = {};
-			for (const [path, struct] of structs)
-				whereRetype[path] = castMacroFor(struct, B.childElemOf(path, rootElem).seed);
-		}
+		if (structs.size) whereRetype = buildRetypeMap(structs, rootElem);
 	}
 
 	return {
