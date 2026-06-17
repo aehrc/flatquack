@@ -102,6 +102,12 @@ Two subtleties make this precise:
   `.item`, the exact depth where physical JSON diverges. A path crossing several forced
   boundaries re-types at each. The method-append form (`<expr>.macro(...)`) composes whether
   the forced field heads the path or sits deeper.
+- Operator nodes that hold sub-expressions thread `inputType` (hence `_retype`) into each
+  operand: both `comparison` (`=`, `<`, …) and `components` (`and`/`or`/`+`/`-`/`*`). So an
+  operand that itself navigates a forced field — `item.maxLength.first() + 1` — is re-typed at
+  its boundary just like a bare column. (Missing this on `components` was a bug: arithmetic then
+  bound raw JSON and threw `+(JSON, INTEGER)`; a boolean combinator was silently masked by
+  DuckDB's JSON→BOOLEAN coercion. Pinned by `ondemand_typing` B11/B12 and a shape assertion.)
 
 ## 4. Where it fires — and where it does not
 

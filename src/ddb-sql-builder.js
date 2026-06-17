@@ -101,8 +101,13 @@ export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql
 
 		//and, or, add, subtract, multiply
 		case 'components':
+			// Thread `inputType` (carrying `_retype`) into each operand, exactly as the `comparison`
+			// case does: an operand that navigates a repeat-forced field (issue #35) must be re-typed
+			// at the boundary, or it binds raw JSON (e.g. `+(JSON, INTEGER)` has no overload). On the
+			// typed spine the element is not an array, so this does not trigger the array-nav branch;
+			// for non-forced views `_retype` is absent, so it is a no-op.
 			const components = node.args.map( c => {
-				return flattenSql( astToSql(c, inLambda, {}, rootVar, rowIndexSql) );
+				return flattenSql( astToSql(c, inLambda, inputType, rootVar, rowIndexSql) );
 			});
 			sql = components.map(c => c.sql).join(` ${node.operator} `);
 			outputType = {fhirType: node.type.fhirType == "number" ? "number" : "boolean_expr", isArray: false}

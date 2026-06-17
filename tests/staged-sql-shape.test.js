@@ -128,3 +128,27 @@ describe("staged - on-demand typing: no-op invariants", () => {
 		expect(sql).not.toMatch(/list_transform\([A-Za-z_]+, x -> fq_cast/);
 	});
 });
+
+// An operand of `+`/`-`/`*`/`and`/`or` (the `components` AST node) that navigates a repeat-forced
+// field must receive the same inline re-type as a bare or compared navigation. This pins the fix for
+// the components case, which previously dropped the re-type map: arithmetic then bound raw JSON and
+// threw (`+(JSON, INTEGER)` has no overload — see ondemand_typing B11), while a boolean combinator
+// was silently masked by DuckDB's implicit JSON->BOOLEAN coercion (B12). The behavioural fixtures
+// can't catch the masked combinator case, so assert the cast on the emitted SQL here.
+describe("staged - on-demand typing: components-operand boundary crossing", () => {
+	const cast = /item\.list_transform\(x -> fq_cast_questionnaire_item\(x\)\)/;
+	test("an arithmetic operand crossing the boundary is re-typed", () => {
+		const view = {resource: "Questionnaire", select: [
+			{column: [{name: "v", path: "item.maxLength.first() + 1", type: "integer"}]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]};
+		expect(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"})).toMatch(cast);
+	});
+	test("a boolean-combinator operand crossing the boundary is re-typed", () => {
+		const view = {resource: "Questionnaire", select: [
+			{column: [{name: "v", path: "item.required.first() or false", type: "boolean"}]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]};
+		expect(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"})).toMatch(cast);
+	});
+});

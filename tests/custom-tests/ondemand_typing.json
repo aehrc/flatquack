@@ -162,6 +162,24 @@
       "expect": [ { "os": "S", "rl": "q" } ]
     },
     {
+      "title": "B11 arithmetic operand crossing the boundary",
+      "description": "An arithmetic operand (`+`) navigating the repeat-forced `item` must be re-typed; otherwise the `+` binds JSON and throws.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "maxLength": 5 }, { "linkId": "y", "type": "display", "maxLength": 6 } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item.maxLength.first() + 1", "type": "integer" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": 6, "rl": "x" }, { "v": 6, "rl": "y" } ]
+    },
+    {
+      "title": "B12 boolean-combinator operand crossing the boundary",
+      "description": "A bare boolean navigation (`item.required.first()`) is a direct operand of `or` and must be re-typed: unlike a comparison (which threads inputType), `or`/`and`/arithmetic route through the `components` case, which previously dropped the re-type and bound JSON.",
+      "resources": [ { "resourceType": "Questionnaire", "id": "q2c", "item": [ { "linkId": "x", "type": "group", "required": true }, { "linkId": "y", "type": "display", "required": false } ] } ],
+      "view": { "resource": "Questionnaire", "select": [
+        { "column": [ { "name": "v", "path": "item.required.first() or false", "type": "boolean" } ] },
+        { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] },
+      "expect": [ { "v": true, "rl": "x" }, { "v": true, "rl": "y" } ]
+    },
+    {
       "title": "C1 unionAll forEach x repeat over the forced field",
       "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
         { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
@@ -272,7 +290,7 @@
 
     {
       "title": "G1 PROBE where-filter crossing the boundary",
-      "description": "A `where` filter navigating the repeat-forced `item`. where paths are compiled without the re-type map; correct behaviour is the filter resolves true and all repeat rows are emitted.",
+      "description": "A `where` filter navigating the repeat-forced `item`. The where path is re-typed at the boundary via buildStagedQuery's where-retype map (the from_json cast appears in the emitted WHERE), so the filter resolves true and all repeat rows are emitted.",
       "resources": [ { "resourceType": "Questionnaire", "id": "qS", "item": [
         { "linkId": "g1", "type": "group", "item": [ { "linkId": "g1.1", "type": "display", "item": [ { "linkId": "g1.1.1", "type": "string" } ] } ] },
         { "linkId": "g2", "type": "group" } ] } ],
