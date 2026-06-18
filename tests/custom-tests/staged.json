@@ -1,6 +1,6 @@
 {
   "title": "staged emitter forks",
-  "description": "Emitter-specific coverage for SPEC_hybrid fork handling: root forks, nested forks (composite key), forEachOrNull branches, and key non-leakage. Backend-agnostic SQL-on-FHIR semantics, so both emitters must pass.",
+  "description": "Emitter-specific coverage for SPEC_view_lowering fork handling: root forks, nested forks (composite key), forEachOrNull branches, and key non-leakage. Backend-agnostic SQL-on-FHIR semantics, so both emitters must pass.",
   "resources": [
     {
       "resourceType": "Patient",

@@ -6,7 +6,7 @@ navigation rather than once in the read schema. It is what makes a `repeat` (whi
 a raw-JSON view of a recursive field) coexist with typed columns/filters that navigate the
 same field, at any depth and any site that crosses the boundary.
 
-Companion to [SPEC_hybrid.md](./SPEC_hybrid.md), which describes the staged emitter and the
+Companion to [SPEC_view_lowering.md](./SPEC_view_lowering.md), which describes the staged emitter and the
 `repeat` lowering this builds on.
 
 ---
@@ -50,7 +50,7 @@ item.list_transform(x -> fq_cast_questionnaire_item(x))   -- JSON[]  →  STRUCT
 where `fq_cast_questionnaire_item(j) AS from_json(j, '{"linkId":"VARCHAR"}')`. After the cast
 the rest of the navigation runs on a typed struct, so the engine's assumption becomes **true**.
 It is the inline form of the same `from_json` bridge that `repeat`/`forEach` already apply at
-the scope level (SPEC_hybrid §5).
+the scope level (SPEC_view_lowering §6).
 
 The structure types only the **leaves actually navigated** (`linkId`); any *recursive*
 sub-part (a nested `item`) stays `JSON[]`, so the finite-STRUCT problem never recurs.
