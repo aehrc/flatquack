@@ -6,7 +6,7 @@ import macros from "../templates/duck-macros";
 import {templateToQuery} from "../src/query-builder.js";
 import fhirSchema from "../schemas/fhir-schema-r4.json";
 
-// Staged backend (SPEC_hybrid): the first CTE reuses the existing source mechanism;
+// Staged backend (SPEC_view_lowering): the first CTE reuses the existing source mechanism;
 // the builder emits the rest of the query into {{fq_staged_tail}}.
 export const stagedQueryTemplate = `
 	{{fq_staged_macros}}

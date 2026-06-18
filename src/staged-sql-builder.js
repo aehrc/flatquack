@@ -3,7 +3,7 @@ import {astToSql} from "./ddb-sql-builder.js";
 import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf, forcedFieldStructures} from "./repeat-lowering.js";
 import {collectColumnNames} from "./view-parser.js";
 
-// Staged-CTE emitter (SPEC_hybrid). Walks the ViewDefinition tree, classifies each
+// Staged-CTE emitter (SPEC_view_lowering). Walks the ViewDefinition tree, classifies each
 // scope CHAIN (<=1 fan-out) or FORK (>=2), and emits staged CTEs. Leaves are compiled
 // by the existing typed FHIRPath engine; the scope element is aliased `_node` and passed
 // as the engine's outer root-var so internal `el` lambdas never collide (design D2). Every
@@ -11,7 +11,7 @@ import {collectColumnNames} from "./view-parser.js";
 // must start with a letter); see the `name` helper in `buildStagedQuery`.
 //
 // `repeat` is the one unbounded-depth directive, so it cannot live on the typed substrate:
-// the descent is performed in JSON (a `WITH RECURSIVE` CTE over a JSON node, SPEC_hybrid §5),
+// the descent is performed in JSON (a `WITH RECURSIVE` CTE over a JSON node, SPEC_view_lowering §6),
 // while every column/forEach/where is still evaluated typed — the recursion's JSON node is
 // converted per-scope to a typed element with a lenient `from_json` bridge, and the existing leaf
 // engine compiles against it unchanged. The binding mode oscillates: typed scopes read

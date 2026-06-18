@@ -40,7 +40,7 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 | `--macros` | | | Experimental - Path to file(s) or directory(ies) containing additional SQL macros. Prefix with `@` to reference files in the templates directory. This argument may be repeated. See [details below](#macros---macros-parameter).| 
 | `--param` | | | `name=value` pair of user defined variables to be used when generating SQL with a [custom template](#custom-templates). This argument may be repeated. | 
 | `--var` | | | `name=value` pair of FHIRPath variables for use in ViewDefinition expressions (referenced as `%name`). This argument may be repeated. | 
-| `--root-key` | | `natural` | Recombination key used when a `select` has two or more independent fan-out children (a fork). `natural` uses the resource key (`getResourceKey()`); `uuid` synthesises a per-resource key. Both produce identical results; see [`specs/SPEC_hybrid.md`](specs/SPEC_hybrid.md). |
+| `--root-key` | | `natural` | Recombination key used when a `select` has two or more independent fan-out children (a fork). `natural` uses the resource key (`getResourceKey()`); `uuid` synthesises a per-resource key. Both produce identical results; see [`docs/SPEC_view_lowering.md`](docs/SPEC_view_lowering.md). |
 | `--verbose` | | false | Print debugging information to the console when running FlatQuack. |
 
 #### Modes (--mode parameter)
