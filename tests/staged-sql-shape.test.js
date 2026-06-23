@@ -24,6 +24,34 @@ describe("staged - %rowIndex over a repeat's own scope is a pre-order window", (
 	});
 });
 
+// `WITH ORDINALITY` is emitted on a forEach unnest PRECISELY when the scope reads `%rowIndex`
+// (SPEC_view_lowering §5/§8) — not always. The ordinal column and the second tuple element are both
+// dropped when no `%rowIndex` is read, so a plain forEach pays nothing for the feature. These assert
+// the emitted SQL because the absence of a clause cannot be expressed as a result-row fixture; the
+// numbering itself is exercised end-to-end by row_index_repeat.json / row_index_union_jsonmode.json.
+describe("staged - WITH ORDINALITY on forEach is emitted only when %rowIndex is read", () => {
+	const plain = {resource: "QuestionnaireResponse", select: [
+		{column: [{name: "id", path: "id", type: "id"}]},
+		{forEach: "item", select: [{column: [{name: "linkId", path: "linkId", type: "string"}]}]}
+	]};
+	const withRi = {resource: "QuestionnaireResponse", select: [
+		{column: [{name: "id", path: "id", type: "id"}]},
+		{forEach: "item", select: [{column: [
+			{name: "linkId", path: "linkId", type: "string"},
+			{name: "ri", path: "%rowIndex", type: "integer"}
+		]}]}
+	]};
+	test("a plain forEach (no %rowIndex) omits WITH ORDINALITY", () => {
+		expect(buildStaged(plain, "/tmp/unused.json", {rootKey: "natural"})).not.toMatch(/WITH ORDINALITY/);
+	});
+	test("a forEach reading %rowIndex emits WITH ORDINALITY and binds the ordinal", () => {
+		const sql = buildStaged(withRi, "/tmp/unused.json", {rootKey: "natural"});
+		// The unnest mints a `_rn_N` ordinal column and `%rowIndex` reads it (0-based: ordinal - 1).
+		expect(sql).toMatch(/UNNEST\(.+\) WITH ORDINALITY AS _u\d+\(_node, _rn_\d+\)/);
+		expect(sql).toMatch(/_rn_\d+ - 1 AS INTEGER\) AS ri/);
+	});
+});
+
 // On-demand typing (issue #35): cast-macro pooling and no-op invariants. These inspect emitted SQL
 // (macro count / re-type wrapper presence), which fixtures cannot express. The from_json cast macro
 // is `fq_cast_<schemaPath>`, pooled by structure string (so identical structures share one macro).

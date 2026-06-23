@@ -135,8 +135,9 @@ joined with `USING`. Generated lazily:
   below needs it.
 - `_ordi` — the ordinal at the *i*-th iterating step on a spine that leads to a fork.
   Emitted via DuckDB's positional zip: `UNNEST(col) WITH ORDINALITY`, or
-  `generate_subscripts(arr, 1)` alongside `unnest(arr)` in a SELECT. A chain that
-  reaches no fork emits no ordinal.
+  `generate_subscripts(arr, 1)` alongside `unnest(arr)` in a SELECT. A chain that reaches
+  no fork emits no ordinal **unless its own scope reads `%rowIndex`** (which needs a private
+  ordinal at that step); a `forEach` whose scope needs neither emits a plain `UNNEST`.
 
 At a **root** fork the key is just `_rid`. At a **nested** fork it is
 `(_rid, _ord1, …)`. The branches of a fork carry the same key columns and recombine
@@ -275,11 +276,12 @@ structural, computed at the unnest/descent step).
 It reuses the ordinal machinery from §5, surfaced as a column value (minus 1, since the
 ordinal is 1-based).
 
-- **forEach / forEachOrNull** — the element's ordinal, available in either mode at zero
-  extra cost: `UNNEST(arr) WITH ORDINALITY AS t(elem, ord)` (chain), or
-  `generate_subscripts(arr, 1)` zipped with `unnest(arr)` (fork). `ord` resets to 1 per
-  parent row, so `%rowIndex = ord - 1`. For a `forEachOrNull` empty→NULL row the ordinal
-  is NULL, so `%rowIndex = COALESCE(ord, 1) - 1 = 0`.
+- **forEach / forEachOrNull** — the element's ordinal: `UNNEST(arr) WITH ORDINALITY AS
+  t(elem, ord)` (chain), or `generate_subscripts(arr, 1)` zipped with `unnest(arr)` (fork).
+  The `WITH ORDINALITY` is emitted **precisely when the scope reads `%rowIndex`** (or a fork
+  below needs the ordinal as a key) — a `forEach` that uses neither pays nothing. `ord`
+  resets to 1 per parent row, so `%rowIndex = ord - 1`. For a `forEachOrNull` empty→NULL row
+  the ordinal is NULL, so `%rowIndex = COALESCE(ord, 1) - 1 = 0`.
 
 - **repeat** — a `repeat` has no single parent collection, so the index is assigned **at
   the repeat scope** (one row per visited node, before any sibling recombination) by a

@@ -385,19 +385,21 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	// ordinal forward as a recombination key (a fork below needs it); otherwise a private ordinal
 	// supplies this iteration's `%rowIndex` only.
 	function emitJsonEach(f, parentRel, carried, keyCols, forkOrd) {
-		// Mint an ordinal so `%rowIndex` is available even when no fork below needs it as a key —
-		// unnestFrom binds the 0-based `%rowIndex` SQL onto `f.childElem.rowIndexSql` from it.
-		const ordName = forkOrd || name("rn");
+		// Mint an ordinal as a carried fork key (`forkOrd`) or when this scope binds `%rowIndex`;
+		// otherwise emit none. unnestFrom binds the 0-based `%rowIndex` SQL onto
+		// `f.childElem.rowIndexSql` from it (left null when no ordinal is emitted).
+		const ordName = forkOrd || ((f.needsOrd || f.usesRi) ? name("rn") : null);
 		const childKey = forkOrd ? [...keyCols, ordName] : keyCols;
 		const from = unnestFrom(parentRel, f, ordName);
 		const structure = B.repeatStructure(f.node, f.childElem.seed);
 		const cast = `${castMacroFor(structure, f.childElem.seed)}(_node)`;
 		const bridge = name("repb");
-		// Project the body element plus the iteration's `%rowIndex` value, so the bridge scope can
-		// bind `%rowIndex` to a column (the raw ordinal is out of scope past this CTE when private).
-		const rnCol = name("jern");
+		// Project the body element plus, when this scope reads `%rowIndex`, the iteration's index
+		// value (the raw ordinal is out of scope past this CTE when private). No index, no column.
+		const rnCol = f.childElem.rowIndexSql ? name("jern") : null;
+		const rnProj = rnCol ? `${f.childElem.rowIndexSql} AS ${rnCol}, ` : "";
 		const carryCols = [...childKey, ...carried];
-		ctes.push(`${bridge} AS (\n  SELECT ${carryCols.length ? carryCols.join(", ") + ", " : ""}${f.childElem.rowIndexSql} AS ${rnCol}, ${cast} AS ${BRIDGE_VAR}\n  FROM ${from}\n)`);
+		ctes.push(`${bridge} AS (\n  SELECT ${carryCols.length ? carryCols.join(", ") + ", " : ""}${rnProj}${cast} AS ${BRIDGE_VAR}\n  FROM ${from}\n)`);
 		const bodyElem = bridgeElem(f.childElem.seed);
 		bodyElem.rowIndexSql = rnCol;
 		return emitScope(f.node, bodyElem, carried, childKey, bridge, false, null);
@@ -471,6 +473,11 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			// way the child key gains `ord{N}`; otherwise the ordinal is private (just this scope's
 			// `%rowIndex`). The enclosing forEach's own `%rowIndex` binding is unchanged.
 			f.needsOrd = subtreeHasFork(f.node) || subtreeHasRepeatUsingRowIndex(f.node);
+			// Whether this scope binds `%rowIndex` to its own iteration ordinal. Together with
+			// `needsOrd` this gates `WITH ORDINALITY`: when both are false, no fork or nested
+			// `%rowIndex` repeat below needs the ordinal as a key and no column here reads it, so the
+			// unnest emits no ordinal at all (the ordinal is otherwise free, but not free of cost).
+			f.usesRi = scopeUsesRowIndex(f.node, f.childElem);
 			stageSelect.push(`${arrSql} AS ${f.arrCol}`);
 		});
 		// materialise each repeat's seed array (the JSON descent reads from it)
@@ -496,9 +503,10 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 			if (realFanouts.length === 1) {
 				const f = realFanouts[0];
 				// A fork-key ordinal (`_ord{depth}`, carried as a key column) doubles as this
-				// iteration's `%rowIndex` source; otherwise a private ordinal supplies it.
+				// iteration's `%rowIndex` source; otherwise a private ordinal supplies it, but only
+				// when this scope actually reads `%rowIndex` — else no ordinal is emitted.
 				if (f.jsonMode) return emitJsonEach(f, relName, carriedAfter, keyCols, f.needsOrd ? `_ord${keyCols.length}` : null);
-				const ordName = f.needsOrd ? `_ord${keyCols.length}` : name("rn");
+				const ordName = f.needsOrd ? `_ord${keyCols.length}` : (f.usesRi ? name("rn") : null);
 				const childKey = f.needsOrd ? [...keyCols, ordName] : keyCols;
 				const from = unnestFrom(relName, f, ordName);
 				const childPrefix = schemaPrefix ? [...schemaPrefix, ...(f.node.forEach || f.node.forEachOrNull).split(".")] : null;
@@ -520,7 +528,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 				branches.push({rel: br.rel, cols: br.cols, kind: f.orNull ? "LEFT" : "INNER"});
 				return;
 			}
-			const from = unnestFrom(relName, f, name("rn"));
+			// A fork branch recombines on the parent `keyCols`; this unnest's ordinal is needed only
+			// to bind the branch's own `%rowIndex` (or a fork/`%rowIndex` repeat deeper in it).
+			const from = unnestFrom(relName, f, (f.needsOrd || f.usesRi) ? name("rn") : null);
 			const br = emitScope(f.node, f.childElem, [], keyCols, from, false, null);
 			branches.push({rel: br.rel, cols: br.cols, kind: f.orNull ? "LEFT" : "INNER"});
 		});
@@ -567,6 +577,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	// Resolved in the child stage, where the ordinal column is in scope. Cast to INTEGER: `WITH
 	// ORDINALITY` yields a BIGINT, but `%rowIndex` is a FHIR `integer`.
 	function bindRowIndex(f, ordName) {
+		// No ordinal was emitted (nothing below needs it): leave `%rowIndex` unbound so a stray
+		// reference is rejected rather than silently wrong, matching a repeat's no-ordinal default.
+		if (!ordName) { f.childElem.rowIndexSql = null; return; }
 		const ord = f.orNull ? `COALESCE(${ordName}, 1)` : ordName;
 		f.childElem.rowIndexSql = `CAST(${ord} - 1 AS INTEGER)`;
 	}
@@ -601,7 +614,15 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 				const {arrSql, childElem} = B.prepareFanout(path, elem);
 				const arrCol = name("u") + "_arr";
 				stageSelect.push(`${arrSql} AS ${arrCol}`);
-				return {node: b, arrCol, orNull: !!b.forEachOrNull, childElem, jsonMode};
+				// Gate WITH ORDINALITY for this branch the same way `emitScope` does for chain/fork
+				// fan-outs: `usesRi` when a column in the branch reads `%rowIndex` (resets per branch),
+				// `needsOrd` when a fork or `%rowIndex` repeat below needs the ordinal. Without these
+				// the `emitJsonEach`/`unnestFrom` gate reads `undefined` and never mints the ordinal,
+				// leaving a `%rowIndex`-reading branch unbound. The branch ordinal is never a
+				// recombination key (branches recombine on the parent `keyCols`), so it stays private.
+				const needsOrd = subtreeHasFork(b) || subtreeHasRepeatUsingRowIndex(b);
+				const usesRi = scopeUsesRowIndex(b, childElem);
+				return {node: b, arrCol, orNull: !!b.forEachOrNull, childElem, jsonMode, needsOrd, usesRi};
 			}
 			// columns only (no iteration): materialise each column expr in the stage
 			// (the scope element is available there but not carried downstream)
@@ -639,8 +660,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 						pushBridged(emitJsonEach(e, srcRel, carried, keyCols, null));
 					} else {
 						// Each iterating unionAll branch gets its own `%rowIndex` ordinal (resets per
-						// branch), exactly like a forEach/forEachOrNull elsewhere.
-						const join = unnestFrom(srcRel, e, name("rn"));
+						// branch), exactly like a forEach/forEachOrNull elsewhere — minted only when the
+						// branch reads `%rowIndex` or needs the ordinal below, else a plain UNNEST.
+						const join = unnestFrom(srcRel, e, (e.needsOrd || e.usesRi) ? name("rn") : null);
 						const colProjs = (e.node.column || []).map(c => B.compileColumn(c, e.childElem));
 						cols = cols || colProjs.map(c => c.name);
 						const sel = [...keyCols, ...carried, ...colProjs.map(c => c.sql)];
