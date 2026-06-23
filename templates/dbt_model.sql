@@ -1,6 +1,6 @@
-{{fq_staged_macros}}
-{{fq_staged_with}} src AS {{fq_staged_src_materialized}}(
-	SELECT {{fq_staged_src}}
-	FROM {{ source('fhir_db', '{{fq_vd_resource}}') }}
-	{{fq_where_filter}}
-){{fq_staged_tail}}
+{{fq_sql_with}} {{fq_sql_input}} AS (
+	SELECT * FROM {{ source('fhir_db', '{{fq_vd_resource}}') }}
+	{{fq_sql_where}}
+),
+{{fq_sql_pipeline}}
+SELECT {{fq_sql_output_columns}} FROM {{fq_sql_output}}

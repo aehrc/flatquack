@@ -21,7 +21,9 @@ A view with no fork anywhere is a pure chain — no keys are emitted at all.
 Implementation: `src/staged-sql-builder.js` (the emitter), `src/repeat-lowering.js`
 (`repeat` descent), `src/query-builder.js` (read schema), `src/view-parser.js`
 (ViewDefinition normalisation). The companion [SPEC_ondemand_typing.md](./SPEC_ondemand_typing.md)
-covers how typed columns coexist with a `repeat`'s raw-JSON descent.
+covers how typed columns coexist with a `repeat`'s raw-JSON descent;
+[SPEC_sql_template_contract.md](./SPEC_sql_template_contract.md) covers how this generated
+pipeline plugs into a template (the `fq_sql_*` variable contract).
 
 ---
 

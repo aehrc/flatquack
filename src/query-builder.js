@@ -21,7 +21,7 @@ export function buildQuery(vd, schema, filterByResourceType, verbose, vars, root
 	validateVd(vd);
 
 	const staged = buildStagedQuery(vd, schema, vars, {rootKey});
-	if (verbose) console.log(staged.tail);
+	if (verbose) console.log(staged.pipeline);
 
 	const whereAsts = (vd.where||[]).map(w => w.path)
 		.concat([filterByResourceType ? `resourceType = '${vd.resource}'` : null])
@@ -69,16 +69,17 @@ export function templateToQuery(vd, schema, template, args=[], verbose, filterBy
 	const templateVars = args.concat([
 		["fq_input_dir", process.cwd()],
 		["fq_output_dir", process.cwd()],
-		["fq_where_filter", whereSql],
+		["fq_sql_where", whereSql],
 		["fq_sql_input_schema", schemaSql],
 		["fq_vd_name", vd.name || "output"],
 		["fq_vd_resource", vd.resource],
 		["fq_sql_macros", allMacros],
-		["fq_staged_src", queryParts.staged.srcSelect],
-		["fq_staged_tail", queryParts.staged.tail],
-		["fq_staged_with", queryParts.staged.withKeyword],
-		["fq_staged_macros", queryParts.staged.macros],
-		["fq_staged_src_materialized", queryParts.staged.srcMaterialized ? "MATERIALIZED " : ""]
+		["fq_sql_view_macros", queryParts.staged.viewMacros],
+		["fq_sql_with", queryParts.staged.withKeyword],
+		["fq_sql_input", queryParts.staged.inputName],
+		["fq_sql_pipeline", queryParts.staged.pipeline],
+		["fq_sql_output", queryParts.staged.outputName],
+		["fq_sql_output_columns", queryParts.staged.outputColumns]
 	]);
 
 	templateVars.forEach( v => {

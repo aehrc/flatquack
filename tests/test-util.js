@@ -6,18 +6,21 @@ import macros from "../templates/duck-macros";
 import {templateToQuery} from "../src/query-builder.js";
 import fhirSchema from "../schemas/fhir-schema-r4.json";
 
-// Staged backend (SPEC_view_lowering): the first CTE reuses the existing source mechanism;
-// the builder emits the rest of the query into {{fq_staged_tail}}.
+// Staged backend (SPEC_sql_template_contract): the template binds the input relation as `_fq_input`
+// (resource columns), the emitter's sealed pipeline flattens it and produces `_fq_output`, and the
+// template projects that as the final SELECT. Base macros are loaded into the db in openMemoryDb,
+// so only the per-view cast macros ({{fq_sql_view_macros}}) appear here.
 export const stagedQueryTemplate = `
-	{{fq_staged_macros}}
-	{{fq_staged_with}} src AS {{fq_staged_src_materialized}}(
-		SELECT {{fq_staged_src}}
-		FROM read_json_auto(
+	{{fq_sql_view_macros}}
+	{{fq_sql_with}} {{fq_sql_input}} AS (
+		SELECT * FROM read_json_auto(
 			'{{test_file_path}}'
 			{{fq_sql_input_schema}}
 		)
-		{{fq_where_filter}}
-	){{fq_staged_tail}}
+		{{fq_sql_where}}
+	),
+	{{fq_sql_pipeline}}
+	SELECT {{fq_sql_output_columns}} FROM {{fq_sql_output}}
 `
 
 export function openMemoryDb() {

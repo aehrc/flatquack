@@ -1,11 +1,12 @@
 {{fq_sql_macros}}
-{{fq_staged_macros}}
-{{fq_staged_with}} src AS {{fq_staged_src_materialized}}(
-	SELECT {{fq_staged_src}}
-	FROM read_json_auto(
+{{fq_sql_view_macros}}
+{{fq_sql_with}} {{fq_sql_input}} AS MATERIALIZED (
+	SELECT * FROM read_json_auto(
 		'{{fq_input_dir}}/**/*{{fq_vd_resource}}*.ndjson'
 		{{fq_sql_input_schema}}
 	)
-	{{fq_where_filter}}
+	{{fq_sql_where}}
 	LIMIT 10
-){{fq_staged_tail}}
+),
+{{fq_sql_pipeline}}
+SELECT {{fq_sql_output_columns}} FROM {{fq_sql_output}}

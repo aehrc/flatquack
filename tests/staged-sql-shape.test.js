@@ -1,5 +1,9 @@
+import fs from "fs";
+import path from "path";
 import {expect, test, describe} from "bun:test";
 import {buildStaged} from "./test-util.js";
+import {templateToQuery} from "../src/query-builder.js";
+import fhirSchema from "../schemas/fhir-schema-r4.json";
 
 // SQL-shape assertion that cannot be expressed as a fixture (it inspects emitted SQL, not result
 // rows). `%rowIndex` indexing a repeat's OWN descent scope is assigned by a pre-order window over
@@ -217,4 +221,31 @@ describe("staged - on-demand typing: no orphaned cast macros", () => {
 		test(`no orphaned macro: ${label}`, () => {
 			expect(orphans(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"}))).toEqual([]);
 		});
+});
+
+// Determinism guard (SPEC_sql_template_contract §7). `explore` applies `LIMIT` to the input, and a
+// forked view reads the input once per branch — a non-materialised `LIMIT` (no ORDER BY) could yield
+// different rows per branch and break fork recombination. The shipped `explore` template therefore
+// binds `_fq_input AS MATERIALIZED`; the file templates (no LIMIT) do not. Render the real template
+// files so the guard tracks what ships, not the test harness.
+describe("templates - explore materialises its limited input for forked-view determinism", () => {
+	const tpl = name => fs.readFileSync(path.join(import.meta.dir, "../templates", name), "utf-8");
+	// Two root forEach siblings => a root fork keyed on `_rid`: the input is read once per branch,
+	// which is the premise of the determinism risk a LIMIT would expose.
+	const forked = {resource: "Patient", select: [
+		{column: [{name: "id", path: "getResourceKey()", type: "string"}]},
+		{forEach: "name", column: [{name: "family", path: "family", type: "string"}]},
+		{forEach: "telecom", column: [{name: "phone", path: "value", type: "string"}]}
+	]};
+	const render = name => templateToQuery(forked, fhirSchema, tpl(name), [], false, true, null, null, "natural");
+
+	test("the view forks (a root fork key is emitted)", () => {
+		expect(render("ndjson.sql")).toMatch(/_rid/);
+	});
+	test("explore binds the input AS MATERIALIZED", () => {
+		expect(render("explore.sql")).toMatch(/_fq_input AS MATERIALIZED/);
+	});
+	test("file templates do not materialise the input", () => {
+		expect(render("ndjson.sql")).not.toMatch(/_fq_input AS MATERIALIZED/);
+	});
 });

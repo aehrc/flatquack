@@ -3,6 +3,17 @@ import {astToSql} from "./ddb-sql-builder.js";
 import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf, forcedFieldStructures} from "./repeat-lowering.js";
 import {collectColumnNames} from "./view-parser.js";
 
+// The reserved CTE names that bracket the emitter's pipeline (SPEC_sql_template_contract). The
+// template binds the input relation as `_fq_input` (whose columns are the resource's elements) and
+// consumes `_fq_output` (the flat, column-clean result). Surfaced to templates as the values of the
+// fq_sql_input / fq_sql_output variables, so a template never types these names itself.
+const INPUT_CTE = "_fq_input";
+const OUTPUT_CTE = "_fq_output";
+// The pipeline's root CTE: the typed projection of the input relation that the flattening stages
+// chain from. `_fq_`-prefixed like the seam CTEs (SPEC_sql_template_contract §4.2) so it can never
+// collide with a user column carried alongside it.
+const SRC_CTE = "_fq_src";
+
 // Staged-CTE emitter (SPEC_view_lowering). Walks the ViewDefinition tree, classifies each
 // scope CHAIN (<=1 fan-out) or FORK (>=2), and emits staged CTEs. Leaves are compiled
 // by the existing typed FHIRPath engine; the scope element is aliased `_node` and passed
@@ -268,7 +279,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 
 	// The root `_rid` is the recombination key for any root fork. In "natural" mode it is the
 	// resource key, sourced from `getResourceKey()`. In "uuid" mode it is a synthesised per-resource
-	// `uuid()` that requires no id-uniqueness assumption, but whose volatility means `src` must be
+	// `uuid()` that requires no id-uniqueness assumption, but whose volatility means `_fq_src` must be
 	// materialised so both fork branches (and a repeat's recursive descent) observe the same value.
 	const rootKeyExpr = rootKeyMode === "uuid"
 		? "uuid()"
@@ -406,8 +417,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	}
 
 	// emitScope: builds a stage exposing keyCols + carried + this scope's columns, then
-	// chains or forks. `fromSql` is the FROM clause for this stage (null at root: the
-	// stage is `src`, whose FROM lives in the template). `schemaPrefix` (typed scopes only)
+	// chains or forks. `fromSql` is the FROM clause for this stage (null at root: the stage is
+	// `_fq_src`; its select list is exposed as `emitScope.srcSelect` and the assembly wraps it as
+	// `_fq_src AS (SELECT … FROM _fq_input)`). `schemaPrefix` (typed scopes only)
 	// is the resource-rooted field path used to mark forced-JSON repeat seeds. Returns {rel, cols}.
 	function emitScope(scopeNode, elem, carried, keyCols, fromSql, isRoot, schemaPrefix) {
 		const {columns, fanouts} = collectScope(scopeNode);
@@ -489,7 +501,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 
 		let relName;
 		if (isRoot) {
-			relName = "src";
+			relName = SRC_CTE;
 			emitScope.srcSelect = stageSelect.join(",\n         ");
 		} else {
 			relName = name("s");
@@ -686,8 +698,14 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	const result = emitScope(vd, rootElem, [], rootKey, null, true, []);
 
 	const order = columnOrder(vd);
-	const finalSelect = `SELECT ${order.join(", ")}\nFROM ${result.rel}`;
-	const tail = (ctes.length ? ",\n" + ctes.join(",\n") : "") + "\n" + finalSelect;
+	const outputColumns = order.join(", ");
+	// The sealed pipeline (SPEC_sql_template_contract §3): the typed `_fq_src` projection reading from the
+	// template-provided `_fq_input`, the flattening CTEs, then a column-clean `_fq_output`. `_fq_src` carries
+	// the `MATERIALIZED` hint when a volatile root key requires it. No leading/trailing comma and no
+	// terminal SELECT — the template owns the comma joining its input CTE and the final projection.
+	const srcCte = `${SRC_CTE} AS ${srcMaterialized ? "MATERIALIZED " : ""}(\n  SELECT ${emitScope.srcSelect}\n  FROM ${INPUT_CTE}\n)`;
+	const outputCte = `${OUTPUT_CTE} AS (\n  SELECT ${outputColumns}\n  FROM ${result.rel}\n)`;
+	const pipeline = [srcCte, ...ctes, outputCte].join(",\n");
 
 	// A `where` path evaluates at the resource root and may navigate a repeat-forced field, so it
 	// needs the same inline re-type a root column gets (issue #35) — otherwise it reads raw JSON and
@@ -703,12 +721,13 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	}
 
 	return {
-		srcSelect: emitScope.srcSelect,
-		tail,
-		srcMaterialized,
-		resourceKeyAst,
 		withKeyword: viewHasRepeat ? "WITH RECURSIVE" : "WITH",
-		macros: macroDefs.length ? macroDefs.join("\n") + "\n" : "",
+		inputName: INPUT_CTE,
+		pipeline,
+		outputName: OUTPUT_CTE,
+		outputColumns,
+		viewMacros: macroDefs.length ? macroDefs.join("\n") + "\n" : "",
+		resourceKeyAst,
 		forcedJsonPaths,
 		whereRetype
 	};
