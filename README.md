@@ -51,6 +51,13 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 | `run` | Execute the SQL and print the time it took to run in the console. | 
 | `explore` | Execute the SQL and print the query output in the console as JSON. Large queries should use the `build` action and run the resulting SQL files [directly with DuckDB](https://duckdb.org/docs/api/cli/overview#non-interactive-usage). |
 
+> **Performance note (DuckDB 1.5+):** On DuckDB 1.5 and later the result sink defaults to
+> preserving insertion order, which serialises the `UNNEST`-heavy queries FlatQuack
+> generates and causes a significant slowdown on large datasets. When running the generated
+> SQL on 1.5+, set `SET preserve_insertion_order = false;` on the session first (FlatQuack's
+> output carries no row order, so this is safe — add an explicit `ORDER BY` only if a
+> consumer needs order). This is not needed on DuckDB 1.4.x.
+
 ## Templates (--template parameter)
 
 ### Sample Templates

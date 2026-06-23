@@ -331,14 +331,22 @@ and therefore cannot collide with any legal view column — even one literally n
   empty collection yields 0 rows; the `[NULL]` pad / `LEFT` join supplies the required
   NULL row.
 - **Shallow shared-array siblings** — ≥2 `forEach` off one parent, none fanning out
-  further — may stay a CHAIN (parallel `, UNNEST(col)` entries): the cross product is
-  small and the key+join overhead is not worth it. Promote to FORK only when a branch
-  fans out further.
+  further. The emitter **always FORKs** at ≥2 fan-outs (the scope classifier is purely
+  `≤1 → CHAIN`, `≥2 → FORK`; there is no shallow-sibling exception). In principle such
+  siblings could stay a CHAIN (parallel `, UNNEST(col)` entries) — less SQL, same per-parent
+  cross product — but a CHAIN cross-products the raw unnested structs whereas a FORK reduces
+  each branch to its scalar projection first, so which is faster depends on struct width and
+  the optimizer's projection push-down, not on SQL simplicity. Tracked as a benchmark-gated
+  optimization in [#39](https://github.com/aehrc/flatquack/issues/39).
 - **`collection` columns** keep the whole collection as one array value. A scalar
   column whose path yields more than one value is an error (rely on validation).
-- **`preserve_insertion_order = false`** before the query lets DuckDB materialise
-  `UNNEST`-heavy results in parallel. Safe for order-insensitive output; add an
-  explicit `ORDER BY` only if a consumer needs order.
+- **`preserve_insertion_order = false`** is a DuckDB **session setting**, not something
+  this lowering emits. On DuckDB **1.5+** the result sink defaults to preserving insertion
+  order, which serialises `UNNEST`-heavy materialisation and causes a significant
+  performance regression; setting it `false` restores parallel materialisation. Apply it at
+  the session/connection level (or in your own template) when running on 1.5+. It is safe
+  for order-insensitive output (SQL-on-FHIR imposes no row order); add an explicit
+  `ORDER BY` only if a consumer needs order.
 - **Constants `%name`** substitute the constant value as a SQL literal.
 - **Recursive CTEs** require one leading `WITH RECURSIVE`; non-recursive CTEs may be
   mixed in freely under it.
