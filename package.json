@@ -1,6 +1,7 @@
 {
 	"name": "flatquack",
 	"version": "0.2.1",
+	"type": "module",
 	"bin": "./src/cli.js",
 	"homepage": "https://flatquack.org",
 	"dependencies": {

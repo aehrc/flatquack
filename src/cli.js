@@ -1,16 +1,22 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
+
+// Run under node, not bun: bun cannot finalize the legacy duckdb@1.4 native
+// addon and intermittently segfaults (exit 133, "NAPI FATAL ERROR") during
+// process teardown — after the query has completed and output was fully
+// written. node tears the same addon down cleanly. See #42 (and #22, which
+// removes the legacy binding entirely). This file is kept portable so that
+// `bun run` / `bun test` still work for development.
 
 import fs from 'fs';
 import path from 'path';
-import {Glob} from "bun";
 import {parseArgs} from "util";
 import {templateToQuery} from "./query-builder.js";
-import fhirSchema from "../schemas/fhir-schema-r4.json";
+import fhirSchema from "../schemas/fhir-schema-r4.json" with { type: "json" };
 import duckdb from "duckdb";
 import {format} from "sql-formatter";
 
 // Read package.json for version info
-const packageJsonPath = path.join(import.meta.dir, "../package.json");
+const packageJsonPath = path.join(import.meta.dirname, "../package.json");
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
 
 function showHelp() {
@@ -45,8 +51,8 @@ Commonly used built-in Templates:
   @dbt_model    Generate a dbt model (reads from dbt source instead of files)
 
 Examples:
-  bunx flatquack
-  bunx flatquack --mode build --template @parquet
+  npx flatquack
+  npx flatquack --mode build --template @parquet
 `);
 	process.exit(0);
 }
@@ -92,7 +98,7 @@ function loadMacros(macroLocations) {
 		// Handle @-prefixed template macro files
 		if (location.startsWith('@')) {
 			const macroName = location.slice(1);
-			resolvedPath = path.join(import.meta.dir, "../templates", macroName + ".sql");
+			resolvedPath = path.join(import.meta.dirname, "../templates", macroName + ".sql");
 			
 			if (!fs.existsSync(resolvedPath)) {
 				console.error(`Error: Template macro file not found: ${macroName} (looked for ${resolvedPath})`);
@@ -150,7 +156,7 @@ function formatSQL(sql) {
 }
 
 const args = parseArgs({
-	args: Bun.argv.slice(2),
+	args: process.argv.slice(2),
 	options: {
 		"view-path": {
 			type: "string", default: ".", 
@@ -181,13 +187,13 @@ if (args.values["version"]) {
 	showVersion();
 }
 
-let templatePath = path.join(import.meta.dir, "../templates/csv.sql");
+let templatePath = path.join(import.meta.dirname, "../templates/csv.sql");
 if (args.values["template"] && args.values["template"][0] == "@") {
-	templatePath = path.join(import.meta.dir, "../templates", args.values["template"].slice(1) + ".sql");
+	templatePath = path.join(import.meta.dirname, "../templates", args.values["template"].slice(1) + ".sql");
 } else if (args.values["template"]) {
 	templatePath = args.values["template"];
 } else  if (!args.values["template"] && args.values["mode"] == "explore") {
-	templatePath = path.join(import.meta.dir, "../templates/explore.sql");
+	templatePath = path.join(import.meta.dirname, "../templates/explore.sql");
 }
 const template = fs.readFileSync(templatePath, "utf-8");
 
@@ -205,9 +211,7 @@ const schema = args.values["schema-file"]
 
 const customMacros = loadMacros(args.values["macros"]);
 
-const glob = new Glob(args.values["view-pattern"]);
-
-for (const file of glob.scanSync(args.values["view-path"],{onlyFiles:true})) {
+for (const file of fs.globSync(args.values["view-pattern"], {cwd: args.values["view-path"]})) {
 	const inputPath = path.join(args.values["view-path"], file);
 	const basename = path.basename(inputPath, path.extname(inputPath));
 	const outputPath = path.join(path.dirname(inputPath), basename + ".sql");
