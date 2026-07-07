@@ -10,8 +10,8 @@ import path from "path";
 // at exit, so we exercise the CLI under node as a subprocess and require every
 // run to exit cleanly with the correct output.
 
-const cliPath = path.join(import.meta.dir, "../src/cli.js");
-const fixtureDir = path.join(import.meta.dir, "cli-exit-fixture.temp");
+const cliPath = path.join(import.meta.dirname, "../src/cli.js");
+const fixtureDir = path.join(import.meta.dirname, "cli-exit-fixture.temp");
 const viewDir = path.join(fixtureDir, "views");
 
 // ~12.5% crash rate was observed; 30 runs catches a regression with ~98%

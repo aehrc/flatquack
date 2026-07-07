@@ -53,6 +53,10 @@ Commonly used built-in Templates:
 Examples:
   bunx flatquack
   bunx flatquack --mode build --template @parquet
+
+Note: the 'run' and 'explore' modes must be run under node, not bun
+(e.g. 'node ./src/cli.js --mode run ...'). Under bun they intermittently
+segfault (exit 133) during teardown after the query completes. See #42.
 `);
 	process.exit(0);
 }
