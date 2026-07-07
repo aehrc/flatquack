@@ -1,8 +1,12 @@
 {
 	"name": "flatquack",
 	"version": "0.2.1",
+	"type": "module",
 	"bin": "./src/cli.js",
 	"homepage": "https://flatquack.org",
+	"engines": {
+		"node": ">=22"
+	},
 	"dependencies": {
 		"duckdb": "^1.4.1",
 		"fhirpath": "^3.10.5",
