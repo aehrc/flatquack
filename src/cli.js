@@ -51,8 +51,8 @@ Commonly used built-in Templates:
   @dbt_model    Generate a dbt model (reads from dbt source instead of files)
 
 Examples:
-  npx flatquack
-  npx flatquack --mode build --template @parquet
+  bunx flatquack
+  bunx flatquack --mode build --template @parquet
 `);
 	process.exit(0);
 }

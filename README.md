@@ -24,11 +24,12 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 
 ## Running FlatQuack
 
-#### `npx flatquack`
+#### `bunx flatquack` 
 
-(or `node ./src/cli.js` if you installed FlatQuack locally using steps 3 and 4 above)
+(or `bun run ./src/cli.js` if you installed FlatQuack locally using steps 3 and 4 above)
 
-> **Run the `run` and `explore` modes under [node](https://nodejs.org), not bun.** These modes execute DuckDB via the legacy `duckdb` native addon, which bun cannot finalize cleanly — it intermittently segfaults (exit 133) during process teardown *after* the query has completed and output was fully written. node tears the same addon down without issue. The SQL-generating modes (`preview`, `build`) work fine under either runtime, e.g. `bun run ./src/cli.js --mode build`.
+> **Known issue:** 
+> the `run` and `explore` modes execute DuckDB via the legacy `duckdb` native addon, which bun cannot finalize cleanly — it intermittently segfaults (exit 133) during process teardown *after* the query has completed and output was fully written. **Workaround:** run these two modes under [node](https://nodejs.org) instead, e.g. `node ./src/cli.js --mode run …`. The SQL-generating modes (`preview`, `build`) are unaffected under bun.
 
 #### Command line arguments
 
