@@ -1,6 +1,6 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
 import {astToSql} from "./ddb-sql-builder.js";
-import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf, forcedFieldStructures, wrap} from "./repeat-lowering.js";
+import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf, forcedFieldStructures, wrap, elemFromType} from "./repeat-lowering.js";
 import {collectColumnNames} from "./view-parser.js";
 
 // The reserved CTE names that bracket the emitter's pipeline (SPEC_sql_template_contract). The
@@ -196,12 +196,7 @@ export function makeBuilder(schema, vars) {
 		const {sql, outputType, type} = compilePath(pathStr, elem);
 		return {
 			arrSql: wrap(sql, outputType.isArray),
-			childElem: {
-				ref: "_node",
-				inLambda: true,
-				seed: type.schemaPath,
-				inputType: {fhirType: type.fhirType, isArray: false, schemaPath: type.schemaPath}
-			}
+			childElem: elemFromType(type)
 		};
 	}
 

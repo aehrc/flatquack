@@ -97,13 +97,21 @@ export function forcedFieldStructures(columns, elemSeed, forcedFields, schema, v
 	return out;
 }
 
-// The element produced by iterating `pathStr` from `elem`. `B` exposes `compilePath`.
-export function childElemOf(pathStr, elem, B) {
-	const {type} = B.compilePath(pathStr, elem);
+// The typed descent element for a resolved path `type`: the iterated child bound to the UNNEST alias
+// `_node` as an in-lambda scalar. This literal is the contract the leaf engine binds against, so it is
+// authored once here and constructed through this helper by both `childElemOf` and the emitter's
+// `prepareFanout`, keeping the two sites from drifting.
+export function elemFromType(type) {
 	return {
 		ref: "_node",
 		inLambda: true,
 		seed: type.schemaPath,
 		inputType: {fhirType: type.fhirType, isArray: false, schemaPath: type.schemaPath}
 	};
+}
+
+// The element produced by iterating `pathStr` from `elem`. `B` exposes `compilePath`.
+export function childElemOf(pathStr, elem, B) {
+	const {type} = B.compilePath(pathStr, elem);
+	return elemFromType(type);
 }
