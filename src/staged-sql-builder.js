@@ -314,7 +314,9 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	// element `el`. `parentRel` exposes the materialised seed column + the carried/key columns.
 	// (The descent CTE MUST live under a leading `WITH RECURSIVE`, set up by the caller — a
 	// recursive CTE under a plain `WITH` errors as `Catalog Error: Table 'rep' does not exist`.)
-	function emitRepeat(f, parentRel, carried, keyCols) {
+	// `keepKey` is forwarded to the body scope so that, when the repeat is itself a fork branch,
+	// the body's result relation physically exposes `keyCols` for the enclosing fork to rejoin on.
+	function emitRepeat(f, parentRel, carried, keyCols, keepKey) {
 		const carryCols = [...keyCols, ...carried];
 		const carryProj = (rel) => carryCols.map(c => `${rel}.${c}`);
 		const lead = (cols) => cols.length ? cols.join(", ") + ", " : "";
@@ -373,7 +375,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 
 		// The body of a repeat is evaluated typed (its element is the from_json bridge); nested
 		// repeat seeds arrive as `<bridge>.<field>` JSON[] and re-enter `WITH RECURSIVE`.
-		return emitScope(f.node, bodyElem, carried, bodyKeyCols, bridge, false, null);
+		return emitScope(f.node, bodyElem, carried, bodyKeyCols, bridge, false, null, keepKey);
 	}
 
 	// A `forEach` over a field that a sibling `repeat` forces to JSON[] (the shared-field case):
@@ -518,8 +520,10 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 				return emitScope(f.node, f.childElem, carriedAfter, childKey, from, false, childPrefix, keepKey);
 			}
 			if (repeatFanouts.length === 1) {
-				// A lone `repeat` is a CHAIN: carry the scope scalars through the rCTE, no key.
-				return emitRepeat(repeatFanouts[0], relName, carriedAfter, keyCols);
+				// A lone `repeat` is a CHAIN: carry the scope scalars through the rCTE, no key. Forward
+				// this scope's `keepKey` so a forking repeat body reached via the chain still exposes
+				// `keyCols` when the chain originates from an enclosing fork branch.
+				return emitRepeat(repeatFanouts[0], relName, carriedAfter, keyCols, keepKey);
 			}
 			// sole unionAll
 			return emitUnion(unionFanouts[0].prepared, relName, carriedAfter, keyCols);
@@ -550,7 +554,8 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		repeatFanouts.forEach(f => {
 			// A `repeat` beside >=1 other fan-out is a FORK branch: carry the fork key through the
 			// rCTE and recombine on it (repeat branches are always independent fan-outs, INNER).
-			const br = emitRepeat(f, relName, [], keyCols);
+			// `keepKey` is true so a forking repeat body exposes `keyCols` for this fork's rejoin.
+			const br = emitRepeat(f, relName, [], keyCols, true);
 			branches.push({rel: br.rel, cols: br.cols, kind: "INNER"});
 		});
 		unionFanouts.forEach(f => {

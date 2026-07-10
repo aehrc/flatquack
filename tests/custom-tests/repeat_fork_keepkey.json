@@ -1,0 +1,76 @@
+{
+  "title": "repeat_fork_keepkey",
+  "description": "Residual keepKey hole after PR #34 finding 1 (typed-unnest and JSON-bridge forEach paths only): a fork branch that is (or chains into) a `repeat` whose body itself forks never receives `keepKey`, so the repeat body's fork CTE omits its `keyCols` and the enclosing fork's `JOIN … USING (keyCols)` fails with `Binder Error: Column \"_rid\" does not exist on right side of join!`. Two cases: (1) the fork branch is directly a `repeat` with a forking body; (2) the fork branch chains through `forEach: item` into a `repeat` with a forking body. Distinct values throughout so the order-independent Set comparison cannot mask a spurious cross-join row.",
+  "fhirVersion": ["5.0.0", "4.0.1", "3.0.2"],
+  "tests": [
+    {
+      "title": "direct repeat branch with a forking body recombines per resource (US1)",
+      "description": "The root forks on a repeat:[item] branch (body forking on forEach:answer + forEach:item) and a sibling forEach:basedOn. The repeat visits q1, q2, c1, c2; only q1 and q2 have both an answer and a child, so the INNER body fork yields per-node rows (a1, c1) and (a2, c2). These recombine with the two basedOn rows on the resource key.",
+      "resources": [
+        {
+          "resourceType": "QuestionnaireResponse", "id": "qr1", "status": "completed",
+          "basedOn": [ { "reference": "co1" }, { "reference": "co2" } ],
+          "item": [
+            { "linkId": "q1", "answer": [ { "valueString": "a1" } ], "item": [ { "linkId": "c1" } ] },
+            { "linkId": "q2", "answer": [ { "valueString": "a2" } ], "item": [ { "linkId": "c2" } ] }
+          ]
+        }
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          {
+            "repeat": ["item"],
+            "select": [
+              { "forEach": "answer", "column": [ { "name": "av", "path": "valueString", "type": "string" } ] },
+              { "forEach": "item", "column": [ { "name": "cl", "path": "linkId", "type": "string" } ] }
+            ]
+          },
+          { "forEach": "basedOn", "column": [ { "name": "ref", "path": "reference", "type": "string" } ] }
+        ]
+      },
+      "expect": [
+        { "av": "a1", "cl": "c1", "ref": "co1" },
+        { "av": "a1", "cl": "c1", "ref": "co2" },
+        { "av": "a2", "cl": "c2", "ref": "co1" },
+        { "av": "a2", "cl": "c2", "ref": "co2" }
+      ]
+    },
+    {
+      "title": "fork branch chaining through forEach into a forking repeat recombines per iteration (US2)",
+      "description": "The root forks on a forEach:item branch whose scope chains into a repeat:[item] with a forking body, and a sibling forEach:basedOn. Within group g1 the repeat visits q1 and c1 (only q1 forks to a row); within g2, q2 and c2. The branch's key carries the forEach:item iteration ordinal, so g1's rows never pair with g2's descent - a cross-join regression would instead produce four rows.",
+      "resources": [
+        {
+          "resourceType": "QuestionnaireResponse", "id": "qr2", "status": "completed",
+          "basedOn": [ { "reference": "co1" } ],
+          "item": [
+            { "linkId": "g1", "item": [ { "linkId": "q1", "answer": [ { "valueString": "a1" } ], "item": [ { "linkId": "c1" } ] } ] },
+            { "linkId": "g2", "item": [ { "linkId": "q2", "answer": [ { "valueString": "a2" } ], "item": [ { "linkId": "c2" } ] } ] }
+          ]
+        }
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          {
+            "forEach": "item",
+            "select": [
+              {
+                "repeat": ["item"],
+                "select": [
+                  { "forEach": "answer", "column": [ { "name": "av", "path": "valueString", "type": "string" } ] },
+                  { "forEach": "item", "column": [ { "name": "cl", "path": "linkId", "type": "string" } ] }
+                ]
+              }
+            ]
+          },
+          { "forEach": "basedOn", "column": [ { "name": "ref", "path": "reference", "type": "string" } ] }
+        ]
+      },
+      "expect": [
+        { "av": "a1", "cl": "c1", "ref": "co1" },
+        { "av": "a2", "cl": "c2", "ref": "co1" }
+      ]
+    }
+  ]
+}
