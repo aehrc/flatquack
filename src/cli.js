@@ -183,6 +183,21 @@ if (args.values["version"]) {
 	showVersion();
 }
 
+// Validate the enum-valued flags up front, before any view is processed, so an invalid value fails
+// fast with a usage message (naming the flag, the bad value and the accepted set) rather than a
+// mid-run stack trace (--root-key) or a silent fallback to preview (--mode). Matches the loadMacros
+// fail-fast pattern of printing to stderr and exiting non-zero.
+const rootKeyModes = ["natural", "uuid"];
+if (!rootKeyModes.includes(args.values["root-key"])) {
+	console.error(`Error: invalid --root-key '${args.values["root-key"]}' (expected: ${rootKeyModes.join(", ")})`);
+	process.exit(1);
+}
+const modes = ["preview", "build", "run", "explore"];
+if (!modes.includes(args.values["mode"])) {
+	console.error(`Error: invalid --mode '${args.values["mode"]}' (expected: ${modes.join(", ")})`);
+	process.exit(1);
+}
+
 let templatePath = path.join(import.meta.dir, "../templates/csv.sql");
 if (args.values["template"] && args.values["template"][0] == "@") {
 	templatePath = path.join(import.meta.dir, "../templates", args.values["template"].slice(1) + ".sql");
