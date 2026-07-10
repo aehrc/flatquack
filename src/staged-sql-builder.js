@@ -432,20 +432,24 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		const unionFanouts = fanouts.filter(f => f.type === "union");
 		const total = realFanouts.length + repeatFanouts.length + unionFanouts.length;
 
-		// A `forEach` whose field a sibling `repeat` forces to JSON[] must read it via the
-		// from_json bridge rather than as a typed struct array (shared-field case).
 		const repeatSeedFields = new Set(repeatFanouts.flatMap(f => f.node.repeat));
-		realFanouts.forEach(f => { f.jsonMode = repeatSeedFields.has(f.node.forEach || f.node.forEachOrNull); });
 
 		// Fields forced to raw JSON[] at THIS element by any sibling `repeat` — its own repeat
 		// fan-outs plus any repeat branch inside a sibling unionAll (which shares this element).
 		// Relative dot paths off the element; may be multi-segment (e.g. `answer.item`, a
-		// QuestionnaireResponse recursion seed). This ONE set drives both the read schema and the
-		// inline re-type, so the two can never disagree about which fields are physically JSON.
+		// QuestionnaireResponse recursion seed). This ONE set drives the read schema, the inline
+		// re-type AND the forEach fan-out mode, so the three can never disagree about which fields are
+		// physically JSON.
 		const forcedSeeds = new Set([
 			...repeatSeedFields,
 			...unionFanouts.flatMap(f => unionRepeatSeeds(f.node.unionAll))
 		]);
+
+		// A `forEach` whose field any sibling `repeat` forces to JSON[] must read it via the from_json
+		// bridge rather than as a typed struct array (shared-field case). Derived from `forcedSeeds`, so
+		// a field a sibling unionAll's `repeat` forces routes through the bridge just like one this
+		// scope's own `repeat` forces.
+		realFanouts.forEach(f => { f.jsonMode = forcedSeeds.has(f.node.forEach || f.node.forEachOrNull); });
 
 		// "repeat wins": force each seed field to JSON[] in the typed read schema. Gated on the typed
 		// spine (schemaPrefix set) — fork/repeat-body scopes read materialised arrays, not source

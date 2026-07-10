@@ -1,0 +1,30 @@
+{
+  "title": "foreach_union_repeat_json",
+  "description": "Finding 3 (PR #34): a direct `forEach` over a field that a sibling `unionAll`'s `repeat` forces to raw JSON[] must read it through the from_json bridge (jsonMode), like `emitScope` already does for a field its OWN sibling `repeat` forces. Before the fix `jsonMode` was derived from this scope's own repeat children only, so the forEach read the forced-JSON field as a typed struct and returned JSON-quoted values. Distinct values so the order-independent Set comparison cannot mask the quoting.",
+  "fhirVersion": ["5.0.0", "4.0.1", "3.0.2"],
+  "tests": [
+    {
+      "title": "forEach beside a unionAll repeat over the same field returns typed values",
+      "description": "Root forks on a direct forEach:item (reading linkId) and a unionAll whose only branch is repeat:[item]. The unionAll forces `item` to JSON[]; the direct forEach must be bridged so linkId is the typed string g1/g2, not the JSON-quoted \"g1\"/\"g2\".",
+      "resources": [
+        {
+          "resourceType": "QuestionnaireResponse", "id": "qr1", "status": "completed",
+          "item": [ { "linkId": "g1" }, { "linkId": "g2" } ]
+        }
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          { "forEach": "item", "column": [ { "name": "fl", "path": "linkId", "type": "string" } ] },
+          { "unionAll": [ { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] } ] }
+        ]
+      },
+      "expect": [
+        { "fl": "g1", "rl": "g1" },
+        { "fl": "g1", "rl": "g2" },
+        { "fl": "g2", "rl": "g1" },
+        { "fl": "g2", "rl": "g2" }
+      ]
+    }
+  ]
+}
