@@ -32,18 +32,28 @@ export function jsonFold(paths, nodeExpr) {
 	return folds.length === 1 ? folds[0] : `list_concat(${folds.join(", ")})`;
 }
 
+// Coerce a compiled path's SQL to a list so it can be UNNESTed: an already-array result is returned
+// as-is, a scalar is wrapped as a 1-element list. Keyed on the SQL-level array-ness (`isArray`, from
+// the compile's `outputType`), not FHIR cardinality — navigation through an array flattens to a list
+// (e.g. `contact.name`), while an indexer like `telecom[0]` yields a scalar even off a list field.
+// The single array-coercion rule, shared by the fan-out seed (`prepareFanout`) and a repeat's typed
+// seed (`typedSeed`); the caller passes its already-computed sql/isArray, so nothing is recompiled.
+export function wrap(sql, isArray) {
+	return isArray ? sql : `as_list(${sql})`;
+}
+
 // The seed array off the enclosing element for a repeat's listed paths: each path is the typed
 // navigation of that path (a repeat seed reads as JSON[]); paths that do not resolve off this
 // element (e.g. `answer.item` off the resource focus) contribute nothing. `B` is the builder
-// handle exposing `compilePath`/`arrayize`.
+// handle exposing `compilePath`.
 export function typedSeed(paths, elem, B) {
 	const parts = [];
 	paths.forEach(p => {
 		let resolved;
 		try { resolved = B.compilePath(p, elem); } catch { return; }
 		if (!resolved.type || !resolved.type.fhirType) return;
-		// arrayize inline from the single compile result rather than recompiling via B.arrayize.
-		parts.push(resolved.outputType.isArray ? resolved.sql : `as_list(${resolved.sql})`);
+		// Coerce inline from the single compile result rather than recompiling the path.
+		parts.push(wrap(resolved.sql, resolved.outputType.isArray));
 	});
 	if (!parts.length) return "[]::JSON[]";
 	return parts.length === 1 ? parts[0] : `list_concat(${parts.join(", ")})`;

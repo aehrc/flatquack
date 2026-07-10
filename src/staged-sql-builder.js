@@ -1,6 +1,6 @@
 import {fhirpathToAst} from "./fhirpath-parser.js";
 import {astToSql} from "./ddb-sql-builder.js";
-import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf, forcedFieldStructures} from "./repeat-lowering.js";
+import {assertSimplePath, jsonFold, typedSeed, repeatStructure, childElemOf, forcedFieldStructures, wrap} from "./repeat-lowering.js";
 import {collectColumnNames} from "./view-parser.js";
 
 // The reserved CTE names that bracket the emitter's pipeline (SPEC_sql_template_contract). The
@@ -190,21 +190,12 @@ export function makeBuilder(schema, vars) {
 		return {name: col.name, expr, sql: `${expr} AS ${col.name}`};
 	}
 
-	// Wrap a non-list path as a 1-element list so it can be UNNESTed. Use the SQL-level
-	// array-ness (outputType), not the FHIR cardinality of the final step: navigation through an
-	// array flattens to a list (e.g. `contact.name`), and an indexer like `telecom[0]` yields a
-	// scalar even though `telecom` is a list.
-	function arrayize(pathStr, elem) {
-		const {sql, outputType} = compilePath(pathStr, elem);
-		return outputType.isArray ? sql : `as_list(${sql})`;
-	}
-
 	// Prepare a fan-out over `pathStr` from `elem` in a single compile pass, returning both the
 	// array SQL to UNNEST and the child scope element.
 	function prepareFanout(pathStr, elem) {
 		const {sql, outputType, type} = compilePath(pathStr, elem);
 		return {
-			arrSql: outputType.isArray ? sql : `as_list(${sql})`,
+			arrSql: wrap(sql, outputType.isArray),
 			childElem: {
 				ref: "_node",
 				inLambda: true,
@@ -214,7 +205,7 @@ export function makeBuilder(schema, vars) {
 		};
 	}
 
-	const builder = {compilePath, compileColumn, arrayize, prepareFanout};
+	const builder = {compilePath, compileColumn, prepareFanout};
 	builder.childElemOf = (pathStr, elem) => childElemOf(pathStr, elem, builder);
 	builder.repeatStructure = (repeatNode, elemSchemaPath) => repeatStructure(repeatNode, elemSchemaPath, schema, vars);
 	return builder;
