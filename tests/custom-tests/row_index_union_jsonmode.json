@@ -1,0 +1,58 @@
+{
+  "title": "row_index_union_jsonmode",
+  "description": "Regression: a forEach/forEachOrNull branch INSIDE a unionAll, over a field a sibling repeat forces to raw JSON[] (jsonMode branch), that reads %rowIndex. emitJsonEach gates WITH ORDINALITY on the branch fanout's needsOrd/usesRi, but prepUnion never sets those on union-branch fanouts, so the gate read undefined and minted no ordinal -> %rowIndex was left unbound and the build threw 'referencing a scope with no defined iteration position'. The forEach branch's own per-iteration %rowIndex (resets per branch) must bind to the unnest ordinal. Distinct discriminator column makes every row attributable under the order-independent Set comparison.",
+  "fhirVersion": ["5.0.0", "4.0.1", "3.0.2"],
+  "tests": [
+    {
+      "title": "%rowIndex in a forEach unionAll branch over a repeat-forced field",
+      "description": "unionAll mixes a repeat branch over `item` (which forces `item` to JSON[]) with a forEach branch over the same `item` that reads %rowIndex. The forEach branch is bridged (jsonMode); its %rowIndex must resolve to the per-element ordinal (0,1,2), not error.",
+      "tags": ["shareable"],
+      "resources": [
+        {
+          "resourceType": "QuestionnaireResponse", "id": "qr1",
+          "status": "completed",
+          "item": [
+            { "linkId": "a" },
+            { "linkId": "b" },
+            { "linkId": "c" }
+          ]
+        }
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "status": "active",
+        "select": [
+          { "column": [ { "name": "id", "path": "id", "type": "id" } ] },
+          {
+            "unionAll": [
+              {
+                "repeat": ["item"],
+                "column": [
+                  { "name": "src", "path": "'repeat'", "type": "string" },
+                  { "name": "linkId", "path": "linkId", "type": "string" },
+                  { "name": "idx", "path": "%rowIndex", "type": "integer" }
+                ]
+              },
+              {
+                "forEach": "item",
+                "column": [
+                  { "name": "src", "path": "'foreach'", "type": "string" },
+                  { "name": "linkId", "path": "linkId", "type": "string" },
+                  { "name": "idx", "path": "%rowIndex", "type": "integer" }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "qr1", "src": "repeat", "linkId": "a", "idx": 0 },
+        { "id": "qr1", "src": "repeat", "linkId": "b", "idx": 1 },
+        { "id": "qr1", "src": "repeat", "linkId": "c", "idx": 2 },
+        { "id": "qr1", "src": "foreach", "linkId": "a", "idx": 0 },
+        { "id": "qr1", "src": "foreach", "linkId": "b", "idx": 1 },
+        { "id": "qr1", "src": "foreach", "linkId": "c", "idx": 2 }
+      ]
+    }
+  ]
+}

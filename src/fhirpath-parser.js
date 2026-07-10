@@ -200,8 +200,16 @@ function simplifyFhirPath(node, type = null, schema = {}, vars = {}) {
 
 		case 'ExternalConstant':
 			const varName = node.children[0].terminalNodeText[0].replace(/`/g, '');
+
+			// `%rowIndex` is a SQL-on-FHIR built-in: the 0-based position of an element within the
+			// collection its enclosing operator iterates, supplied by the engine per iteration (not a
+			// user-defined `--var`). Emit a dedicated segment the staged emitter resolves to the
+			// per-iteration ordinal; do NOT route it through the `vars` lookup below.
+			if (varName === "rowIndex")
+				return [{ segmentType: "rowIndex", type: { fhirType: "integer", isArray: false } }];
+
 			const varValue = vars[varName];
-			
+
 			if (varValue === undefined) {
 				throw new Error(`Variable %${varName} is not defined. Use --var ${varName}=value to define it.`);
 			}

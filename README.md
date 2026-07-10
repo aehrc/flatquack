@@ -40,6 +40,7 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 | `--macros` | | | Experimental - Path to file(s) or directory(ies) containing additional SQL macros. Prefix with `@` to reference files in the templates directory. This argument may be repeated. See [details below](#macros---macros-parameter).| 
 | `--param` | | | `name=value` pair of user defined variables to be used when generating SQL with a [custom template](#custom-templates). This argument may be repeated. | 
 | `--var` | | | `name=value` pair of FHIRPath variables for use in ViewDefinition expressions (referenced as `%name`). This argument may be repeated. | 
+| `--root-key` | | `natural` | Recombination key used when a `select` has two or more independent fan-out children (a fork). `natural` uses the resource key (`getResourceKey()`) and assumes every resource has a present, per-type-unique `id` (id-less rows are dropped by the recombination join, duplicate ids cross-join). `uuid` synthesises a per-resource key and carries no such assumption. See [`docs/SPEC_view_lowering.md`](docs/SPEC_view_lowering.md). |
 | `--verbose` | | false | Print debugging information to the console when running FlatQuack. |
 
 #### Modes (--mode parameter)
@@ -50,6 +51,13 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 | `run` | Execute the SQL and print the time it took to run in the console. | 
 | `explore` | Execute the SQL and print the query output in the console as JSON. Large queries should use the `build` action and run the resulting SQL files [directly with DuckDB](https://duckdb.org/docs/api/cli/overview#non-interactive-usage). |
 
+> **Performance note (DuckDB 1.5+):** On DuckDB 1.5 and later the result sink defaults to
+> preserving insertion order, which serialises the `UNNEST`-heavy queries FlatQuack
+> generates and causes a significant slowdown on large datasets. When running the generated
+> SQL on 1.5+, set `SET preserve_insertion_order = false;` on the session first (FlatQuack's
+> output carries no row order, so this is safe — add an explicit `ORDER BY` only if a
+> consumer needs order). This is not needed on DuckDB 1.4.x.
+
 ## Templates (--template parameter)
 
 ### Sample Templates
@@ -58,8 +66,8 @@ Additional steps if you would like to run scripts, unit tests or edit the projec
 | [`@csv`](./templates/csv.sql) (default) | NDJSON FHIR Bulk Data files with a `.ndjson` extension and the resource type in the name | Flat CSV files with a header row |
 | [`@parquet`](./templates/parquet.sql) | NDJSON FHIR Bulk Data files with a `.ndjson` extension and the resource type in the name | Parquet files ready for additional processing |
 | [`@ndjson`](./templates/ndjson.sql) | NDJSON FHIR Bulk Data files with a `.ndjson` extension | NDJSON file with one line per output row and just the abstracted data|
-| [`@dbt_model`](./templates/dbt_model.sql) | DBT Source named `fhir_db` with tables named as FHIR resource types | SQL Select statement that returns a flat table |
-| [`@dbt_prehook`](./templates/dbt_prehook.sql) | NA | DuckDB SQL macros to load before executing a query generated with FlatQuack |
+| [`@dbt_model`](./templates/dbt_model.sql) | DBT Source named `fhir_db` with tables named as FHIR resource types | SQL Select statement that returns a flat table (a single statement; macros load via the prehook) |
+| [`@dbt_prehook`](./templates/dbt_prehook.sql) | NA | Base and per-view DuckDB SQL macros to load (as a model `pre_hook`) before executing the model |
 | [`@explore`](./templates/explore.sql) (default for the `explore` mode) | NDJSON FHIR Bulk Data files with a `.ndjson` extension and the resource type in the name | Flattened table with up to 10 results |
 
 ### Custom Templates
@@ -69,14 +77,22 @@ FlatQuack uses a very simple template language that replaces specific variables 
 | --- | --- |
 | `fq_input_dir`| Defaults to current working directory |
 | `fq_output_dir`| Defaults to current working directory |
-| `fq_sql_transform_expression` | SQL transformation generated from the `select` element of the ViewDefinition |
-| `fq_where_filter` | SQL generated from the `where` element of the ViewDefinition |
-| `fq_sql_input_schema` | SQL schema generated from FHIR elements used in the `select` and `where` elements of the ViewDefinition |
-| `fq_sql_flattening_cols` | SQL columns that create the output columns based on the `column` elements in the ViewDefinition |
-| `fq_sql_flattening_tables` | SQL joins that create the output columns based on the `column` elements in the ViewDefinition  |
 | `fq_vd_name` | The value in the `name` element of the ViewDefinition |
 | `fq_vd_resource` | The value in the `resource` element of the ViewDefinition |
-| `fq_sql_macros` | DuckDB SQL macros to load before executing a query generated with FlatQuack |
+| `fq_sql_macros` | Base DuckDB SQL macros to load before executing a query generated with FlatQuack |
+| `fq_sql_view_macros` | Per-view cast macros generated for the ViewDefinition, loaded in addition to `fq_sql_macros` |
+| `fq_sql_with` | The leading `WITH` keyword for the pipeline (`WITH RECURSIVE` when the view uses a `repeat` directive) |
+| `fq_sql_input` | Name of the input CTE the pipeline reads from (`_fq_input`); the template defines this CTE with the resource's elements as its columns |
+| `fq_sql_input_schema` | Typed read columns (`, columns={…}`) generated from the FHIR elements used in the `select` and `where` elements; empty for an untyped read |
+| `fq_sql_where` | SQL `WHERE` clause generated from the `where` element of the ViewDefinition (empty when the view has no filter) |
+| `fq_sql_pipeline` | The sealed CTE list that flattens the input into the output relation (no leading/trailing comma, no terminal `SELECT`) |
+| `fq_sql_output_columns` | The flattened output columns, in order, for the final projection |
+| `fq_sql_output` | Name of the output CTE the pipeline produces (`_fq_output`), containing exactly the flattened columns, in order |
+
+A template binds the input CTE and projects the pipeline's output:
+`{{fq_sql_with}} {{fq_sql_input}} AS (SELECT * FROM <source> {{fq_sql_where}}), {{fq_sql_pipeline}} SELECT {{fq_sql_output_columns}} FROM {{fq_sql_output}}` — see [`templates/ndjson.sql`](./templates/ndjson.sql) for a worked example and [`docs/SPEC_sql_template_contract.md`](./docs/SPEC_sql_template_contract.md) for the full contract.
+
+> **Migration note:** All SQL-construction variables use the `fq_sql_` prefix. The data source is now bound as a named **input CTE** (`fq_sql_input`) that the emitter's pipeline consumes, and the pipeline produces a named **output CTE** (`fq_sql_output`); the template's job is to define the input and project the output. The `fq_sql_transform_expression`, `fq_where_filter`, `fq_sql_flattening_cols`, and `fq_sql_flattening_tables` variables released in v0.2.x no longer exist. Custom templates must be rewritten against the variables above — see [`docs/SPEC_sql_template_contract.md`](./docs/SPEC_sql_template_contract.md).
 
 ## Macros (--macros parameter)
 As an experimental feature, DuckDB macros or native DuckDB functions that accept and return a scalar value may be used in ViewDefinitions processed with FlatQuack. This feature enables custom data transformations, anonymization, and other scalar processing functions to be applied to FHIR data during flattening.
@@ -116,7 +132,7 @@ The `_invoke` function can be used:
 - On scalar or array values (arrays are mapped over automatically)
 - With multiple parameters: `id._invoke('substring', 1, 2)`
 - Inside `where()` clauses: `address.where(country._invoke('anon_is_usa'))`
-- Within `_forEach` expressions for complex transformations
+- Within `forEach` / `forEachOrNull` select expressions for complex transformations
 
 ### Loading Macros via Command Line
 Use the `--macros` parameter to load macro files when running FlatQuack. This parameter accepts:

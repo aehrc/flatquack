@@ -1,0 +1,229 @@
+{
+  "title": "row_index_repeat",
+  "description": "Extended %rowIndex-over-repeat cases NOT covered by the official row_index.json (which has a single root-level repeat over one resource). Staged backend only: depth-first pre-order numbering for repeat, per-enclosing-instance partitioning, repeat-under-forEach, repeat-in-repeat, repeat-in-unionAll, and repeat-at-a-fork. Each test's discriminator column makes rows attributable under the order-independent Set comparison, so pre-order is verified by the index value bound to each linkId, not by output row order.",
+  "fhirVersion": ["5.0.0", "4.0.1", "3.0.2"],
+  "resources": [
+    {
+      "resourceType": "QuestionnaireResponse",
+      "id": "qr1",
+      "status": "completed",
+      "item": [
+        {
+          "linkId": "1",
+          "item": [
+            { "linkId": "1.1" },
+            { "linkId": "1.2" }
+          ]
+        },
+        {
+          "linkId": "2",
+          "item": [
+            { "linkId": "2.1" }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceType": "QuestionnaireResponse",
+      "id": "qr2",
+      "status": "completed",
+      "item": [
+        {
+          "linkId": "A",
+          "item": [
+            { "linkId": "A.1" }
+          ]
+        },
+        {
+          "linkId": "B"
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "title": "%rowIndex over a fork-free repeat partitions per resource",
+      "description": "A lone repeat (single fan-out child => CHAIN, no fork) over MULTIPLE resources. row_index.json cannot catch a missing PARTITION BY because it has only one QuestionnaireResponse; with two, the pre-order index must restart at 0 per resource, which requires the emitter to force a per-resource partition key (rid) even though no fork exists.",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "status": "active",
+        "select": [
+          { "column": [ { "name": "id", "path": "id", "type": "id" } ] },
+          {
+            "repeat": ["item"],
+            "column": [
+              { "name": "item_index", "path": "%rowIndex", "type": "integer" },
+              { "name": "linkId", "path": "linkId", "type": "string" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "qr1", "item_index": 0, "linkId": "1" },
+        { "id": "qr1", "item_index": 1, "linkId": "1.1" },
+        { "id": "qr1", "item_index": 2, "linkId": "1.2" },
+        { "id": "qr1", "item_index": 3, "linkId": "2" },
+        { "id": "qr1", "item_index": 4, "linkId": "2.1" },
+        { "id": "qr2", "item_index": 0, "linkId": "A" },
+        { "id": "qr2", "item_index": 1, "linkId": "A.1" },
+        { "id": "qr2", "item_index": 2, "linkId": "B" }
+      ]
+    },
+    {
+      "title": "%rowIndex over a repeat nested inside a forEach restarts per enclosing element",
+      "description": "forEach item (top-level groups) with a repeat over the group's sub-items. The repeat's pre-order index must restart per (resource, group), so the enclosing forEach must mint an ordinal key carried down to the repeat even though the whole view is fork-free. Group B (qr2) has no sub-items: its repeat is empty (INNER) and yields no rows.",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "status": "active",
+        "select": [
+          { "column": [ { "name": "id", "path": "id", "type": "id" } ] },
+          {
+            "forEach": "item",
+            "column": [
+              { "name": "group_index", "path": "%rowIndex", "type": "integer" },
+              { "name": "group_link", "path": "linkId", "type": "string" }
+            ],
+            "select": [
+              {
+                "repeat": ["item"],
+                "column": [
+                  { "name": "item_index", "path": "%rowIndex", "type": "integer" },
+                  { "name": "linkId", "path": "linkId", "type": "string" }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "qr1", "group_index": 0, "group_link": "1", "item_index": 0, "linkId": "1.1" },
+        { "id": "qr1", "group_index": 0, "group_link": "1", "item_index": 1, "linkId": "1.2" },
+        { "id": "qr1", "group_index": 1, "group_link": "2", "item_index": 0, "linkId": "2.1" },
+        { "id": "qr2", "group_index": 0, "group_link": "A", "item_index": 0, "linkId": "A.1" }
+      ]
+    },
+    {
+      "title": "%rowIndex over a repeat nested inside a repeat chains its index",
+      "description": "Outer repeat over all items (pre-order); for each visited outer node, an inner repeat over that node's sub-items. The inner index must restart per outer node, which requires partitioning the inner window by the outer repeat's own %rowIndex (the (rid, outer_rn) chaining) rather than by a list. Outer nodes with no sub-items yield no rows (inner repeat is empty/INNER). NOTE: this case is not exercised by the official suite.",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "status": "active",
+        "select": [
+          { "column": [ { "name": "id", "path": "id", "type": "id" } ] },
+          {
+            "repeat": ["item"],
+            "column": [
+              { "name": "outer_index", "path": "%rowIndex", "type": "integer" },
+              { "name": "outer_link", "path": "linkId", "type": "string" }
+            ],
+            "select": [
+              {
+                "repeat": ["item"],
+                "column": [
+                  { "name": "inner_index", "path": "%rowIndex", "type": "integer" },
+                  { "name": "inner_link", "path": "linkId", "type": "string" }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "qr1", "outer_index": 0, "outer_link": "1", "inner_index": 0, "inner_link": "1.1" },
+        { "id": "qr1", "outer_index": 0, "outer_link": "1", "inner_index": 1, "inner_link": "1.2" },
+        { "id": "qr1", "outer_index": 3, "outer_link": "2", "inner_index": 0, "inner_link": "2.1" },
+        { "id": "qr2", "outer_index": 0, "outer_link": "A", "inner_index": 0, "inner_link": "A.1" }
+      ]
+    },
+    {
+      "title": "%rowIndex over a repeat inside a unionAll branch numbers independently",
+      "description": "A unionAll whose first branch is a repeat (pre-order over all items, numbering its own visited nodes) and whose second branch is a non-iterating columns-only branch (which inherits the enclosing index => 0 at the root). The repeat branch must be detected through the union and given a forced per-resource partition; the columns-only sibling is independent. (A sibling forEach over the same `item` field would additionally exercise the orthogonal repeat-forces-JSON shared-field handling for union branches, which is out of scope here.)",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "status": "active",
+        "select": [
+          { "column": [ { "name": "id", "path": "id", "type": "id" } ] },
+          {
+            "unionAll": [
+              {
+                "repeat": ["item"],
+                "column": [
+                  { "name": "idx", "path": "%rowIndex", "type": "integer" },
+                  { "name": "val", "path": "linkId", "type": "string" },
+                  { "name": "marker", "path": "'rep'", "type": "string" }
+                ]
+              },
+              {
+                "column": [
+                  { "name": "idx", "path": "%rowIndex", "type": "integer" },
+                  { "name": "val", "path": "status", "type": "string" },
+                  { "name": "marker", "path": "'root'", "type": "string" }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "qr1", "idx": 0, "val": "1", "marker": "rep" },
+        { "id": "qr1", "idx": 1, "val": "1.1", "marker": "rep" },
+        { "id": "qr1", "idx": 2, "val": "1.2", "marker": "rep" },
+        { "id": "qr1", "idx": 3, "val": "2", "marker": "rep" },
+        { "id": "qr1", "idx": 4, "val": "2.1", "marker": "rep" },
+        { "id": "qr1", "idx": 0, "val": "completed", "marker": "root" },
+        { "id": "qr2", "idx": 0, "val": "A", "marker": "rep" },
+        { "id": "qr2", "idx": 1, "val": "A.1", "marker": "rep" },
+        { "id": "qr2", "idx": 2, "val": "B", "marker": "rep" },
+        { "id": "qr2", "idx": 0, "val": "completed", "marker": "root" }
+      ]
+    },
+    {
+      "title": "%rowIndex over a repeat at a fork survives recombination",
+      "description": "A root fork: a repeat sibling and a forEach sibling (two fan-out children => FORK, key = rid). The repeat's pre-order %rowIndex must be assigned at the repeat's own scope and carried as a scalar through the fork JOIN, NOT recomputed on the cross-product output. The result is the per-resource cross product of the repeat rows and the forEach rows, each retaining its own index.",
+      "tags": ["shareable"],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "status": "active",
+        "select": [
+          { "column": [ { "name": "id", "path": "id", "type": "id" } ] },
+          {
+            "repeat": ["item"],
+            "column": [
+              { "name": "r_idx", "path": "%rowIndex", "type": "integer" },
+              { "name": "r_link", "path": "linkId", "type": "string" }
+            ]
+          },
+          {
+            "forEach": "item",
+            "column": [
+              { "name": "f_idx", "path": "%rowIndex", "type": "integer" },
+              { "name": "f_link", "path": "linkId", "type": "string" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "qr1", "r_idx": 0, "r_link": "1",   "f_idx": 0, "f_link": "1" },
+        { "id": "qr1", "r_idx": 0, "r_link": "1",   "f_idx": 1, "f_link": "2" },
+        { "id": "qr1", "r_idx": 1, "r_link": "1.1", "f_idx": 0, "f_link": "1" },
+        { "id": "qr1", "r_idx": 1, "r_link": "1.1", "f_idx": 1, "f_link": "2" },
+        { "id": "qr1", "r_idx": 2, "r_link": "1.2", "f_idx": 0, "f_link": "1" },
+        { "id": "qr1", "r_idx": 2, "r_link": "1.2", "f_idx": 1, "f_link": "2" },
+        { "id": "qr1", "r_idx": 3, "r_link": "2",   "f_idx": 0, "f_link": "1" },
+        { "id": "qr1", "r_idx": 3, "r_link": "2",   "f_idx": 1, "f_link": "2" },
+        { "id": "qr1", "r_idx": 4, "r_link": "2.1", "f_idx": 0, "f_link": "1" },
+        { "id": "qr1", "r_idx": 4, "r_link": "2.1", "f_idx": 1, "f_link": "2" },
+        { "id": "qr2", "r_idx": 0, "r_link": "A",   "f_idx": 0, "f_link": "A" },
+        { "id": "qr2", "r_idx": 0, "r_link": "A",   "f_idx": 1, "f_link": "B" },
+        { "id": "qr2", "r_idx": 1, "r_link": "A.1", "f_idx": 0, "f_link": "A" },
+        { "id": "qr2", "r_idx": 1, "r_link": "A.1", "f_idx": 1, "f_link": "B" },
+        { "id": "qr2", "r_idx": 2, "r_link": "B",   "f_idx": 0, "f_link": "A" },
+        { "id": "qr2", "r_idx": 2, "r_link": "B",   "f_idx": 1, "f_link": "B" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "title": "staged emitter forks",
+  "description": "Emitter-specific coverage for SPEC_view_lowering fork handling: root forks, nested forks (composite key), forEachOrNull branches, and key non-leakage. Backend-agnostic SQL-on-FHIR semantics, so both emitters must pass.",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "name": [
+        {"family": "Smith", "given": ["Al", "Bo"], "prefix": ["Mr"]},
+        {"family": "Jones", "given": ["Cy"], "prefix": ["Dr", "Sir"]}
+      ],
+      "telecom": [
+        {"system": "phone", "value": "111"},
+        {"system": "email", "value": "a@b"}
+      ]
+    },
+    {
+      "resourceType": "Patient",
+      "id": "p2",
+      "name": [
+        {"family": "Doe", "given": ["Dee"]}
+      ],
+      "telecom": []
+    }
+  ],
+  "tests": [
+    {
+      "title": "nested fork uses a composite key (per-parent cross product)",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {"column": [{"name": "id", "path": "id", "type": "id"}]},
+          {
+            "forEach": "name",
+            "select": [
+              {"forEach": "given", "column": [{"name": "given", "path": "$this", "type": "string"}]},
+              {"forEach": "prefix", "column": [{"name": "prefix", "path": "$this", "type": "string"}]}
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {"id": "p1", "given": "Al", "prefix": "Mr"},
+        {"id": "p1", "given": "Bo", "prefix": "Mr"},
+        {"id": "p1", "given": "Cy", "prefix": "Dr"},
+        {"id": "p1", "given": "Cy", "prefix": "Sir"}
+      ],
+      "expectColumns": ["id", "given", "prefix"]
+    },
+    {
+      "title": "root fork is the per-resource cross product (INNER drops empty)",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {"column": [{"name": "id", "path": "id", "type": "id"}]},
+          {"forEach": "name", "column": [{"name": "family", "path": "family", "type": "string"}]},
+          {"forEach": "telecom", "column": [{"name": "system", "path": "system", "type": "code"}]}
+        ]
+      },
+      "expect": [
+        {"id": "p1", "family": "Smith", "system": "phone"},
+        {"id": "p1", "family": "Smith", "system": "email"},
+        {"id": "p1", "family": "Jones", "system": "phone"},
+        {"id": "p1", "family": "Jones", "system": "email"}
+      ],
+      "expectColumns": ["id", "family", "system"]
+    },
+    {
+      "title": "forEachOrNull branch in a fork keeps the row with NULLs",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {"column": [{"name": "id", "path": "id", "type": "id"}]},
+          {"forEach": "name", "column": [{"name": "family", "path": "family", "type": "string"}]},
+          {"forEachOrNull": "telecom", "column": [{"name": "system", "path": "system", "type": "code"}]}
+        ]
+      },
+      "expect": [
+        {"id": "p1", "family": "Smith", "system": "phone"},
+        {"id": "p1", "family": "Smith", "system": "email"},
+        {"id": "p1", "family": "Jones", "system": "phone"},
+        {"id": "p1", "family": "Jones", "system": "email"},
+        {"id": "p2", "family": "Doe", "system": null}
+      ]
+    },
+    {
+      "title": "root fork with no id column reads the key without leaking it",
+      "description": "A root fork that projects NO id column (two sibling forEach over non-id columns). Natural-key mode must still read `id` to key the fork without leaking it into the output; expectColumns pins that only the user columns appear. Per-resource cross product: p1 has 2 names x 2 telecoms = 4 rows; p2 has empty telecom (INNER drops).",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {"forEach": "name", "column": [{"name": "family", "path": "family", "type": "string"}]},
+          {"forEach": "telecom", "column": [{"name": "system", "path": "system", "type": "code"}]}
+        ]
+      },
+      "expect": [
+        {"family": "Smith", "system": "phone"},
+        {"family": "Smith", "system": "email"},
+        {"family": "Jones", "system": "phone"},
+        {"family": "Jones", "system": "email"}
+      ],
+      "expectColumns": ["family", "system"]
+    }
+  ]
+}

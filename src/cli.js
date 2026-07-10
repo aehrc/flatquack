@@ -28,6 +28,7 @@ Options:
   -s, --schema-file <path>      Custom schema file path (default: built-in FHIR R4 schema)
       --macros <path>           Custom macro file or directory (can be repeated)
       --var <name=value>        Values for FHIRPath constants in ViewDefinition (can be repeated)
+      --root-key <mode>         Root-fork recombination key: natural|uuid (default: natural)
       --param <name=value>      Template parameters (can be used repeated)
       --verbose                 Enable verbose output
       --help                    Show this help message
@@ -165,6 +166,7 @@ const args = parseArgs({
 		"macros": {type: "string", multiple: true},
 		"verbose": {type: "boolean"},
 		"mode": {type: "string", short: "m", default: "preview"},
+		"root-key": {type: "string", default: "natural"},
 		"param": {type: "string", multiple: true},
 		"var": {type: "string", multiple: true},
 		"help": {type: "boolean"},
@@ -179,6 +181,21 @@ if (args.values["help"]) {
 
 if (args.values["version"]) {
 	showVersion();
+}
+
+// Validate the enum-valued flags up front, before any view is processed, so an invalid value fails
+// fast with a usage message (naming the flag, the bad value and the accepted set) rather than a
+// mid-run stack trace (--root-key) or a silent fallback to preview (--mode). Matches the loadMacros
+// fail-fast pattern of printing to stderr and exiting non-zero.
+const rootKeyModes = ["natural", "uuid"];
+if (!rootKeyModes.includes(args.values["root-key"])) {
+	console.error(`Error: invalid --root-key '${args.values["root-key"]}' (expected: ${rootKeyModes.join(", ")})`);
+	process.exit(1);
+}
+const modes = ["preview", "build", "run", "explore"];
+if (!modes.includes(args.values["mode"])) {
+	console.error(`Error: invalid --mode '${args.values["mode"]}' (expected: ${modes.join(", ")})`);
+	process.exit(1);
 }
 
 let templatePath = path.join(import.meta.dir, "../templates/csv.sql");
@@ -213,7 +230,7 @@ for (const file of glob.scanSync(args.values["view-path"],{onlyFiles:true})) {
 	const outputPath = path.join(path.dirname(inputPath), basename + ".sql");
 
 	const view = JSON.parse(fs.readFileSync(inputPath));
-	const query = templateToQuery(view, schema, template, params, args.values["verbose"], undefined, customMacros, vars);
+	const query = templateToQuery(view, schema, template, params, args.values["verbose"], undefined, customMacros, vars, args.values["root-key"]);
 	const formattedQuery = formatSQL(query);
 
 	if (args.values["mode"] == "build") {

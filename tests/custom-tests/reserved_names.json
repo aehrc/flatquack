@@ -1,0 +1,71 @@
+{
+  "title": "reserved_names",
+  "description": "A ViewDefinition column name is a valid SQL identifier starting with a letter. The staged emitter carries internal bookkeeping columns (the resource key, fork ordinals, a repeat's descent path / node / pre-order index) alongside user columns in the same CTEs; every internal identifier is `_`-prefixed (which a valid column name can never start with) so a user column may legally be named `rid`, `node`, `path`, or `ord` and still compile and return correct rows. Uses per-test `resources` (a custom-suite extension) so each case carries only the data it needs.",
+  "fhirVersion": ["5.0.0", "4.0.1", "3.0.2"],
+  "tests": [
+    {
+      "title": "a column named 'rid' under a root fork",
+      "resources": [
+        {"resourceType": "Patient", "id": "p1", "name": [{"family": "Smith"}], "telecom": [{"system": "phone", "value": "1"}]}
+      ],
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {"column": [{"name": "rid", "path": "id", "type": "id"}]},
+          {"forEach": "name", "column": [{"name": "family", "path": "family", "type": "string"}]},
+          {"forEach": "telecom", "column": [{"name": "system", "path": "system", "type": "code"}]}
+        ]
+      },
+      "expect": [
+        {"rid": "p1", "family": "Smith", "system": "phone"}
+      ]
+    },
+    {
+      "title": "a column named 'node' carried into a %rowIndex repeat",
+      "resources": [
+        {"resourceType": "QuestionnaireResponse", "id": "qr1", "item": [{"linkId": "a", "item": [{"linkId": "a1"}]}]}
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          {"column": [{"name": "node", "path": "id", "type": "id"}]},
+          {
+            "repeat": ["item"],
+            "column": [
+              {"name": "linkId", "path": "linkId", "type": "string"},
+              {"name": "idx", "path": "%rowIndex", "type": "integer"}
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {"node": "qr1", "linkId": "a", "idx": 0},
+        {"node": "qr1", "linkId": "a1", "idx": 1}
+      ]
+    },
+    {
+      "title": "columns named 'path' and 'ord' inside a %rowIndex repeat body",
+      "resources": [
+        {"resourceType": "QuestionnaireResponse", "id": "qr1", "item": [{"linkId": "a", "item": [{"linkId": "a1"}]}]}
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          {"column": [{"name": "id", "path": "id", "type": "id"}]},
+          {
+            "repeat": ["item"],
+            "column": [
+              {"name": "path", "path": "linkId", "type": "string"},
+              {"name": "ord", "path": "linkId", "type": "string"},
+              {"name": "idx", "path": "%rowIndex", "type": "integer"}
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {"id": "qr1", "path": "a", "ord": "a", "idx": 0},
+        {"id": "qr1", "path": "a1", "ord": "a1", "idx": 1}
+      ]
+    }
+  ]
+}

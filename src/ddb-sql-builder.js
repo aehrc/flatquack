@@ -1,23 +1,8 @@
-export function tablesToSql(tables) {
-
-	const fieldSql = tables.filter(t => t.type == "field")
-		.map(t => `${t.parent||"result"}.${t.fieldName}`)
-		.join(", ");
-	
-	const joinSql = tables.map( (t,i) => {
-		if (t.type == "nullEach" || t.allowNull) {
-			return `LEFT JOIN UNNEST(${t.parent||"result"}.${t.name}) AS l_${i}(${t.name}) ON TRUE`;
-		} else if (t.type == "each" || (t.type == "union" && !t.allowNull)) {
-			return `CROSS JOIN UNNEST(${t.parent||"result"}.${t.name}) AS f_${i}(${t.name})`;
-		}
-		
-	}).filter(t => !!t).join(" ")
-
-	return {fieldSql, joinSql};
-
-}
-
-export function astToSql(node, inLambda, inputType={}) {
+// `rowIndexSql` carries the SQL for the current `%rowIndex` — the 0-based position within the
+// nearest enclosing iteration. It defaults to "0" (no enclosing iteration: resource root, or a
+// non-iterating projection branch). A `forEach`/`forEachOrNull` stage rebinds it to its
+// per-iteration ordinal minus 1; threaded unchanged through every nested leaf expression.
+export function astToSql(node, inLambda, inputType={}, rootVar="el", rowIndexSql="0") {
 
 	function flattenSql(querySegments) {
 		if (!querySegments) return;
@@ -43,7 +28,7 @@ export function astToSql(node, inLambda, inputType={}) {
 	if (Array.isArray(node)) {
 		let prevOutputType = inputType;
 		const outputSql = node.map(n => {
-			const query = astToSql(n, inLambda, prevOutputType);
+			const query = astToSql(n, inLambda, prevOutputType, rootVar, rowIndexSql);
 			//only treat first element of a navigation array as in lambda (prefixed with 'el')
 			if (inLambda) inLambda = false; 
 			if (query) prevOutputType = query.outputType;
@@ -61,7 +46,7 @@ export function astToSql(node, inLambda, inputType={}) {
 		case 'expr':
 		case 'paren':
 			const children = Array.isArray(node.children) ? node.children : [node.children];
-			const query = flattenSql( astToSql(children, inLambda, inputType) );
+			const query = flattenSql( astToSql(children, inLambda, inputType, rootVar, rowIndexSql) );
 			return {
 				sql: node.segmentType == "paren" ? `(${query.sql})` : query.sql, 
 				outputType: query.outputType
@@ -69,7 +54,7 @@ export function astToSql(node, inLambda, inputType={}) {
 
 		case 'nav':
 			if (inLambda) {
-				sql = `(el.${node.value})`
+				sql = `(${rootVar}.${node.value})`
 				outputType = {fhirType: node.type.fhirType, isArray: node.type.isArray, isNav: false}
 			} else if (inputType.fhirType && inputType.isArray) {
 				sql = `list_transform(el -> el.${node.value})${node.type.isArray ? ".flatten()" : ""}`;
@@ -78,16 +63,61 @@ export function astToSql(node, inLambda, inputType={}) {
 				sql = node.value;
 				outputType = {fhirType: node.type.fhirType, isArray: node.type.isArray, isNav: true};
 			}
+			// Issue #35 (universal): a field a sibling `repeat` forced to raw JSON[] is re-typed to its
+			// declared structure here, so navigation off it yields typed values rather than JSON — the
+			// inline form of the structural bridge the repeat/forEach paths use (all three sites share
+			// the `from_json` cast macro; see `castMacroFor`). `_retype` is keyed by path RELATIVE to the
+			// scope element (e.g. `answer.item`); it rides on the element `inputType` and is propagated
+			// down each matched segment onto the navigated `outputType`, so the cast fires at the exact
+			// depth where the physical JSON diverges from the declared type — not only the first segment.
+			// A path that crosses several forced boundaries re-types at each. Method-append form
+			// (`<expr>.macro(...)`) so the cast composes whether the field heads the path or is deeper.
+			//
+			// MAINTENANCE RULE: the `nav` case is the only site that APPLIES the cast, but it only sees
+			// `_retype` if every enclosing node THREADS `inputType` (hence `_retype`) into its sub-
+			// expressions. Any node that holds a sub-expression AND imposes a SQL type on it must thread:
+			// today `comparison`, `components` (and/or/+/-/*), and the `where` lambda do. A new such node
+			// that forgets will not error — it binds raw JSON and silently mis-evaluates (the masked
+			// JSON->BOOLEAN coercion class; see `components` and the `where` comments). The cheap detector
+			// is an orphaned `fq_cast_*` macro: built but never called (staged-sql-shape "no orphaned
+			// cast macros"). Lambda-bearing nodes reset the STRUCTURAL type but must keep the `_retype`
+			// channel — pass `{_retype: inputType._retype}`, not `{}`.
+			const retypes = inputType._retype;
+			if (retypes) {
+				const castMac = retypes[node.value];
+				if (typeof castMac === "string")
+					sql = outputType.isArray ? `${sql}.list_transform(x -> ${castMac}(x))` : `${sql}.${castMac}()`;
+				const descPrefix = node.value + ".";
+				const descRetypes = {};
+				for (const k in retypes)
+					if (k.startsWith(descPrefix)) descRetypes[k.slice(descPrefix.length)] = retypes[k];
+				if (Object.keys(descRetypes).length) outputType = {...outputType, _retype: descRetypes};
+			}
 			return {sql, outputType}
 
 		case 'literal':
 			sql = node.type.fhirType != "dateTime" ? node.value : `(TIMESTAMP '${node.value.replace("T", " ")}')`
 			return {sql, outputType: {fhirType: node.type.fhirType, isArray: false}};
-		
+
+		// `%rowIndex`: the 0-based position within the nearest enclosing iteration, threaded as
+		// `rowIndexSql` (bound to the iteration ordinal minus 1 by an enclosing forEach/forEachOrNull;
+		// to a pre-order descent window by an enclosing `repeat`; else "0" at the resource root / a
+		// non-iterating branch). A `null` binding means the scope cannot supply a position — guard
+		// against silently emitting a constant if a scope ever reaches the leaf engine without one.
+		case 'rowIndex':
+			if (rowIndexSql == null)
+				throw new Error("%rowIndex referencing a scope with no defined iteration position");
+			return {sql: rowIndexSql, outputType: {fhirType: "integer", isArray: false}};
+
 		//and, or, add, subtract, multiply
 		case 'components':
+			// Thread the element `inputType` into each operand, exactly as `comparison` does — an
+			// operand navigating a repeat-forced field (issue #35) must carry `_retype` to be re-typed
+			// at the boundary, else it binds raw JSON (`+(JSON, INTEGER)` has no overload). Safe because
+			// an element's inputType is never an array (isArray:false at every scope), so this can't
+			// trigger the array-nav branch; for non-forced views `_retype` is absent, so it is a no-op.
 			const components = node.args.map( c => {
-				return flattenSql( astToSql(c, inLambda) );
+				return flattenSql( astToSql(c, inLambda, inputType, rootVar, rowIndexSql) );
 			});
 			sql = components.map(c => c.sql).join(` ${node.operator} `);
 			outputType = {fhirType: node.type.fhirType == "number" ? "number" : "boolean_expr", isArray: false}
@@ -95,9 +125,9 @@ export function astToSql(node, inLambda, inputType={}) {
 
 		//equality, inequality
 		case 'comparison':
-			let leftQuery = astToSql(node.args[0], inLambda, inputType);
+			let leftQuery = astToSql(node.args[0], inLambda, inputType, rootVar, rowIndexSql);
 			let leftIsArray = leftQuery.at(-1).outputType.isArray
-			let rightQuery = astToSql(node.args[1], inLambda, inputType);
+			let rightQuery = astToSql(node.args[1], inLambda, inputType, rootVar, rowIndexSql);
 			let rightIsArray = rightQuery.at(-1).outputType.isArray;
 			if (rightIsArray && !leftIsArray) {
 				[rightQuery, leftQuery] = [leftQuery, rightQuery];
@@ -115,7 +145,7 @@ export function astToSql(node, inLambda, inputType={}) {
 
 		case 'this':
 			return {
-				sql: inLambda ? "el" : "",
+				sql: inLambda ? rootVar : "",
 				outputType: inputType
 			}
 
@@ -130,18 +160,27 @@ export function astToSql(node, inLambda, inputType={}) {
 					};
 
 				case 'join':
-					sql = `list_aggregate('string_agg', ${(firstArg && firstArg.value) || "''"}).ifnull2('')`;
+					// join() over an empty collection yields empty (NULL), not "" — do not coerce.
+					sql = `list_aggregate('string_agg', ${(firstArg && firstArg.value) || "''"})`;
 					return {sql, outputType: {fhirType: "string", isArray: false}}
 				
 				case 'where':
+					// The predicate resets the STRUCTURAL type (its lambda navigates from a fresh `el`),
+					// but must preserve the `_retype` channel (issue #35): a repeat-forced field reached
+					// FIRST inside the lambda — `where(item.maxLength = 6)`, implicit `$this`, with no outer
+					// nav to fire the cast — would otherwise bind raw JSON and silently mis-compare. The
+					// `_retype` keys are relative to the scope element, which is exactly what `el` binds here
+					// (the singleton, or each array element), so the cast still fires at its divergence depth.
+					// `{_retype: undefined}` is a no-op for non-forced views (byte-for-byte unchanged).
+					const lamInput = {_retype: inputType._retype};
 					if (inputType && inputType.isArray) {
-						sql = `list_filter(el -> ${flattenSql(astToSql(firstArg, true)).sql})`;
+						sql = `list_filter(el -> ${flattenSql(astToSql(firstArg, true, lamInput, "el", rowIndexSql)).sql})`;
 						outputType = {fhirType: inputType.fhirType, isArray: true}
 					} else if (inputType.fhirType) {
-						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(firstArg, true)).sql}).slice(1)`;
+						sql = `as_list().list_filter(el -> ${flattenSql(astToSql(firstArg, true, lamInput, "el", rowIndexSql)).sql}).slice(1)`;
 						outputType = {fhirType: inputType.fhirType, isArray: false}
 					} else {
-						sql = flattenSql(astToSql(firstArg)).sql;			
+						sql = flattenSql(astToSql(firstArg, undefined, lamInput, rootVar, rowIndexSql)).sql;
 						outputType = {fhirType: "boolean_expr", isArray: false}
 					}
 					return {sql, outputType}
@@ -188,7 +227,7 @@ export function astToSql(node, inLambda, inputType={}) {
 				case '_col_collection':
 					const colName = firstArg.value;
 					const colValue = node.args[1].at(-1);
-					let colValueSql = flattenSql(astToSql(node.args[1], inLambda, inputType));
+					let colValueSql = flattenSql(astToSql(node.args[1], inLambda, inputType, rootVar, rowIndexSql));
 					
 					// This validation can only really be run at runtime since a collection that happens
 					// to have one value is treated as a non-collection and doesn't need the collection tag. 
@@ -206,47 +245,6 @@ export function astToSql(node, inLambda, inputType={}) {
 					}
 					return {sql: `${colName}: ${colValueSql.sql}`, outputType: colValueSql.outputType};
 			
-				//non-standard
-				case '_forEach':
-				case '_forEachOrNull':
-
-					//TODO: error if each arg is not a col function
-					const orNullSql = node.name == "_forEachOrNull" 
-						? ".ifnull2([NULL])" 
-						: ""
-			
-					if (!inputType.fhirType) {
-						const cols = node.args.map(a => astToSql(a, inLambda, inputType)).map(flattenSql).map(a => a.sql).join(",");
-						sql = `{${cols}}`;
-						outputType = {fhirType: inputType.fhirType, isArray: false};
-					} else if (inputType.fhirType && !inputType.isArray) {
-						const cols = node.args.map(a => astToSql(a, true, inputType)).map(flattenSql).map(a => a.sql).join(",");
-						sql = `as_list().list_transform(el -> {${cols}})${orNullSql}`;
-						outputType = {fhirType: inputType.fhirType, isArray: true};
-					} else {
-						const cols = node.args.map(a => astToSql(a, true, inputType)).map(flattenSql).map(a => a.sql).join(",");
-						sql = `${inLambda ? "el.as_list()." : ""}list_transform(el -> {${cols}})${orNullSql}`;
-						outputType = {fhirType: inputType.fhirType, isArray: true};
-					}
-					return {sql, outputType}
-
-				//non-standard
-				case '_unionAll':
-					const unions = node.args.map(a => {
-						const flat = flattenSql(astToSql(a, inLambda, inputType));
-						const arraySql = flat.outputType.isArray
-							? `coalesce(${flat.sql}, [])`
-							: `[${flat.sql}]`;
-						return {
-							sql: arraySql,
-							outputType: {...flat.outputType, isArray: true}
-						}
-					});
-					return {
-						sql: unions.map(u => u.sql).join(" || "), 
-						outputType: unions.length ? unions[0].outputType : {isArray: true}
-					};
-
 				//non-standard
 				case '_invoke':
 					const macroName = firstArg.value.replace(/^['"]|['"]$/g, ''); // Remove quotes
@@ -280,7 +278,7 @@ export function astToSql(node, inLambda, inputType={}) {
 					
 					// Process additional parameters (skip the first arg which is the macro name)
 					const macroParams = node.args.slice(1).map(argNodes => {
-						const argAst = flattenSql(astToSql(argNodes, false, inputType));
+						const argAst = flattenSql(astToSql(argNodes, false, inputType, rootVar, rowIndexSql));
 						return argAst.sql;
 					}).join(', ');
 					
@@ -304,25 +302,55 @@ export function astToSql(node, inLambda, inputType={}) {
 	}
 }
 
+// The scalar SQL type a leaf path node reads as. A non-primitive (uppercase) FHIR type, or a
+// node with no resolved type, falls back to raw JSON.
+function leafSqlType(node) {
+	if (node.fhirType == "decimal") return "DOUBLE";
+	if (["boolean", "integer"].indexOf(node.fhirType) > -1) return node.fhirType.toUpperCase();
+	if (node.fhirType && node.fhirType[0] != node.fhirType[0].toUpperCase()) return "VARCHAR";
+	return "JSON";
+}
+
 export function pathsToSchema(node, isInRoot=true) {
 	if (Array.isArray(node)) {
 		const schema = node.map(n => pathsToSchema(n, isInRoot)).join(", ");
-		return (isInRoot) ? `{ ${schema} }` : schema; 
+		return (isInRoot) ? `{ ${schema} }` : schema;
 	}
 
 	const arrayIndicator = node.isArray ? "[]" : "";
 	let sqlType;
-	if (!node.fhirType) console.log(`${JSON.stringify(node)} is of an unknown type`)
-	if (node.children.length) {
-		sqlType = `STRUCT(${node.children.map(c => pathsToSchema(c, false)).join(", ")})${arrayIndicator}`
-	} else if (node.fhirType == "decimal") {
-		sqlType = `DOUBLE${arrayIndicator}`;
-	} else if (["boolean", "integer"].indexOf(node.fhirType) > -1) {
-		sqlType = `${node.fhirType.toUpperCase()}${arrayIndicator}`;
-	} else if (node.fhirType && node.fhirType[0] != node.fhirType[0].toUpperCase()) {
-		sqlType = `VARCHAR${arrayIndicator}`;
-	} else {
+	// A repeat seed is read as a raw JSON list (a recursive FHIR type is not a finite STRUCT);
+	// it forces JSON regardless of any sibling navigation that would otherwise type it.
+	if (node.forceJson) {
 		sqlType = `JSON${arrayIndicator}`;
+	} else {
+		// Diagnostic only: a node without a resolved FHIR type still gets a best-effort SQL type.
+		// Warn on stderr — the compiled SQL goes to stdout, so logging here must not pollute it.
+		if (!node.fhirType) console.warn(`${JSON.stringify(node)} is of an unknown type`);
+		sqlType = node.children.length
+			? `STRUCT(${node.children.map(c => pathsToSchema(c, false)).join(", ")})${arrayIndicator}`
+			: `${leafSqlType(node)}${arrayIndicator}`;
 	}
 	return isInRoot ? `${node.value}: '${sqlType}'` : `${node.value} ${sqlType}`
+};
+
+// Render a path tree as a `from_json` structure (the JSON-object form `from_json` accepts:
+// objects are `{"f":T,...}`, arrays of objects are `[{...}]`, scalar/JSON leaves are quoted
+// type strings like `"VARCHAR"`, `"VARCHAR[]"`, `"JSON[]"`). Truncated/childless complex
+// nodes (notably nested-repeat seeds) become `"JSON[]"`, matching the truncate-at-repeat-seed
+// schema rule and keeping those subtrees raw so they can re-enter `WITH RECURSIVE`.
+export function pathsToJsonStruct(node, isInRoot=true) {
+	const objOf = nodes => `{${nodes.map(n => `${JSON.stringify(n.value)}:${pathsToJsonStruct(n, false)}`).join(",")}}`;
+	if (Array.isArray(node)) return objOf(node);
+
+	const arr = node.isArray;
+	let typeStr;
+	if (!node.forceJson && node.children && node.children.length) {
+		const inner = objOf(node.children);
+		typeStr = arr ? `[${inner}]` : inner;
+	} else {
+		const scalar = node.forceJson ? "JSON" : leafSqlType(node);
+		typeStr = JSON.stringify(`${scalar}${arr ? "[]" : ""}`);
+	}
+	return isInRoot ? `{${JSON.stringify(node.value)}:${typeStr}}` : typeStr;
 };

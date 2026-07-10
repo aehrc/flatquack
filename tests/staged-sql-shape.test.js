@@ -1,0 +1,251 @@
+import fs from "fs";
+import path from "path";
+import {expect, test, describe} from "bun:test";
+import {buildStaged} from "./test-util.js";
+import {templateToQuery} from "../src/query-builder.js";
+import fhirSchema from "../schemas/fhir-schema-r4.json";
+
+// SQL-shape assertion that cannot be expressed as a fixture (it inspects emitted SQL, not result
+// rows). `%rowIndex` indexing a repeat's OWN descent scope is assigned by a pre-order window over
+// the descent path (not a constant 0, not rejected). The end-to-end numbering is exercised by the
+// row_index_repeat.json fixture; here we only assert the build compiles and emits the pre-order
+// window. Internal carry/key/path columns are `_`-prefixed so they can never collide with a user
+// column name: `_rid` partition, `_path` pre-order order.
+describe("staged - %rowIndex over a repeat's own scope is a pre-order window", () => {
+	const riView = {
+		resource: "QuestionnaireResponse",
+		select: [
+			{column: [{name: "id", path: "id", type: "id"}]},
+			{repeat: ["item"], column: [
+				{name: "linkId", path: "linkId", type: "string"},
+				{name: "ri", path: "%rowIndex", type: "integer"}
+			]}
+		]
+	};
+	test("emits a row_number() pre-order window partitioned per resource", () => {
+		const sql = buildStaged(riView, "/tmp/unused.json", {rootKey: "natural"});
+		expect(sql).toMatch(/row_number\(\) OVER \(PARTITION BY _rid ORDER BY _path\)/);
+	});
+});
+
+// `WITH ORDINALITY` is emitted on a forEach unnest PRECISELY when the scope reads `%rowIndex`
+// (SPEC_view_lowering §5/§8) — not always. The ordinal column and the second tuple element are both
+// dropped when no `%rowIndex` is read, so a plain forEach pays nothing for the feature. These assert
+// the emitted SQL because the absence of a clause cannot be expressed as a result-row fixture; the
+// numbering itself is exercised end-to-end by row_index_repeat.json / row_index_union_jsonmode.json.
+describe("staged - WITH ORDINALITY on forEach is emitted only when %rowIndex is read", () => {
+	const plain = {resource: "QuestionnaireResponse", select: [
+		{column: [{name: "id", path: "id", type: "id"}]},
+		{forEach: "item", select: [{column: [{name: "linkId", path: "linkId", type: "string"}]}]}
+	]};
+	const withRi = {resource: "QuestionnaireResponse", select: [
+		{column: [{name: "id", path: "id", type: "id"}]},
+		{forEach: "item", select: [{column: [
+			{name: "linkId", path: "linkId", type: "string"},
+			{name: "ri", path: "%rowIndex", type: "integer"}
+		]}]}
+	]};
+	test("a plain forEach (no %rowIndex) omits WITH ORDINALITY", () => {
+		expect(buildStaged(plain, "/tmp/unused.json", {rootKey: "natural"})).not.toMatch(/WITH ORDINALITY/);
+	});
+	test("a forEach reading %rowIndex emits WITH ORDINALITY and binds the ordinal", () => {
+		const sql = buildStaged(withRi, "/tmp/unused.json", {rootKey: "natural"});
+		// The unnest mints a `_rn_N` ordinal column and `%rowIndex` reads it (0-based: ordinal - 1).
+		expect(sql).toMatch(/UNNEST\(.+\) WITH ORDINALITY AS _u\d+\(_node, _rn_\d+\)/);
+		expect(sql).toMatch(/_rn_\d+ - 1 AS INTEGER\) AS ri/);
+	});
+});
+
+// On-demand typing (issue #35): cast-macro pooling and no-op invariants. These inspect emitted SQL
+// (macro count / re-type wrapper presence), which fixtures cannot express. The from_json cast macro
+// is `fq_cast_<schemaPath>`, pooled by structure string (so identical structures share one macro).
+const countCastMacros = sql => (sql.match(/CREATE OR REPLACE MACRO fq_cast/g) || []).length;
+
+describe("staged - on-demand typing: cast-macro pooling", () => {
+	// A columns-only branch navigating item.linkId.first() and a repeat branch reading linkId both
+	// need the SAME element structure {"linkId":"VARCHAR"}, so the macro pools to ONE definition.
+	test("identical structures across a columns-only and a repeat branch share one macro", () => {
+		const view = {resource: "Questionnaire", select: [{unionAll: [
+			{column: [{name: "linkId", path: "item.linkId.first()", type: "string"}]},
+			{repeat: ["item"], column: [{name: "linkId", path: "linkId", type: "string"}]}
+		]}]};
+		expect(countCastMacros(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"}))).toBe(1);
+	});
+	// Two sibling repeats force two different element types (item, answer); their crossing columns
+	// need different structures ({"linkId":...} vs {"valueString":...}), so two distinct macros.
+	test("distinct forced element types get distinct macros", () => {
+		const view = {resource: "QuestionnaireResponse", select: [{forEach: "item", select: [
+			{column: [
+				{name: "ic", path: "item.linkId.first()", type: "string"},
+				{name: "ac", path: "answer.value.ofType(string).first()", type: "string"}
+			]},
+			{repeat: ["item"], column: [{name: "ri", path: "linkId", type: "string"}]},
+			{repeat: ["answer"], column: [{name: "ra", path: "value.ofType(string)", type: "string"}]}
+		]}]};
+		expect(countCastMacros(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"}))).toBe(2);
+	});
+	// Two columns navigating the SAME leaf of the forced field share the repeat's bridge structure
+	// ({"linkId":"VARCHAR"}), so the whole view needs exactly one macro.
+	test("two columns on the same leaf reuse a single macro", () => {
+		const view = {resource: "Questionnaire", select: [
+			{column: [
+				{name: "a", path: "item.linkId.first()", type: "string"},
+				{name: "b", path: "item[0].linkId", type: "string"}
+			]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]};
+		expect(countCastMacros(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"}))).toBe(1);
+	});
+	// Two columns navigating DIFFERENT leaves of one forced field merge into a single from_json
+	// structure that carries both leaves (one cast per element, not one per leaf).
+	test("two leaves of one forced field merge into one structure", () => {
+		const view = {resource: "Questionnaire", select: [
+			{column: [
+				{name: "lk", path: "item.linkId.first()", type: "string"},
+				{name: "mx", path: "item.maxLength.first()", type: "integer"}
+			]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]};
+		const sql = buildStaged(view, "/tmp/unused.json", {rootKey: "natural"});
+		expect(sql).toMatch(/from_json\(j, '\{"linkId":"VARCHAR","maxLength":"INTEGER"\}'\)/);
+	});
+	// Two ofType() choices on the same crossed polymorphic element (`value`) merge into ONE structure
+	// carrying both typed leaves — the cast is per-element, not per-choice. (The end-to-end value of
+	// each choice is governed by ofType/first semantics, which are exercised in the fixtures.)
+	test("multiple ofType choices on one element merge into a single structure", () => {
+		const view = {resource: "QuestionnaireResponse", select: [
+			{column: [
+				{name: "dec", path: "item.answer.value.ofType(decimal).first()", type: "decimal"},
+				{name: "dt", path: "item.answer.value.ofType(date).first()", type: "date"}
+			]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]};
+		const sql = buildStaged(view, "/tmp/unused.json", {rootKey: "natural"});
+		expect(sql).toMatch(/\{"answer":\[\{"valueDecimal":"DOUBLE","valueDate":"VARCHAR"\}\]\}/);
+	});
+});
+
+describe("staged - on-demand typing: no-op invariants", () => {
+	// A view with no repeat forces nothing to JSON, so no cast macro and no re-type wrapper appear —
+	// non-repeat compilation is unaffected by the feature.
+	test("a non-repeat view emits no cast macro", () => {
+		const view = {resource: "Questionnaire", select: [{column: [
+			{name: "id", path: "id", type: "id"},
+			{name: "fl", path: "item.linkId.first()", type: "string"}
+		]}]};
+		expect(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"})).not.toMatch(/fq_cast/);
+	});
+	// Only the boundary-crossing column is wrapped in the from_json re-type; a plain column (`id`)
+	// compiles untouched.
+	test("only the boundary-crossing column is re-typed; a plain column is untouched", () => {
+		const view = {resource: "Questionnaire", select: [
+			{column: [
+				{name: "id", path: "id", type: "id"},
+				{name: "fl", path: "item.linkId.first()", type: "string"}
+			]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]};
+		const sql = buildStaged(view, "/tmp/unused.json", {rootKey: "natural"});
+		expect(sql).toMatch(/item\.list_transform\(x -> fq_cast_questionnaire_item\(x\)\)/);
+		expect(sql).toMatch(/id AS id/);
+	});
+	// A repeat view whose columns never cross the boundary (only read the bridged element) emits no
+	// inline re-type wrapper — the bridge alone types the body, nothing is double-cast.
+	test("a repeat view with no boundary-crossing column emits no inline re-type wrapper", () => {
+		const view = {resource: "Questionnaire", select: [
+			{column: [{name: "id", path: "id", type: "id"}]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]};
+		const sql = buildStaged(view, "/tmp/unused.json", {rootKey: "natural"});
+		expect(sql).not.toMatch(/list_transform\([A-Za-z_]+, x -> fq_cast/);
+	});
+});
+
+// An operand of `+`/`-`/`*`/`and`/`or` (the `components` AST node) that navigates a repeat-forced
+// field must receive the same inline re-type as a bare or compared navigation. This pins the fix for
+// the components case, which previously dropped the re-type map: arithmetic then bound raw JSON and
+// threw (`+(JSON, INTEGER)` has no overload — see ondemand_typing B11), while a boolean combinator
+// was silently masked by DuckDB's implicit JSON->BOOLEAN coercion (B12). The behavioural fixtures
+// can't catch the masked combinator case, so assert the cast on the emitted SQL here.
+describe("staged - on-demand typing: components-operand boundary crossing", () => {
+	const cast = /item\.list_transform\(x -> fq_cast_questionnaire_item\(x\)\)/;
+	test("an arithmetic operand crossing the boundary is re-typed", () => {
+		const view = {resource: "Questionnaire", select: [
+			{column: [{name: "v", path: "item.maxLength.first() + 1", type: "integer"}]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]};
+		expect(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"})).toMatch(cast);
+	});
+	test("a boolean-combinator operand crossing the boundary is re-typed", () => {
+		const view = {resource: "Questionnaire", select: [
+			{column: [{name: "v", path: "item.required.first() or false", type: "boolean"}]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]};
+		expect(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"})).toMatch(cast);
+	});
+});
+
+// Every minted `fq_cast_*` macro must actually be CALLED somewhere in the body. A macro that is
+// defined but never referenced ("orphaned") is the structural tell of a re-type map that was built
+// but failed to thread to the navigation site — e.g. a forced field reached first inside a `where()`
+// lambda whose predicate dropped `_retype` (the boundary `forcedFieldStructures` still derived the
+// structure, minting the macro, but the leaf engine never applied it). This guard is the cheap,
+// view-agnostic detector for that whole class; the behavioural fixtures (ondemand_typing B13/B14)
+// pin the specific where()-lambda case.
+describe("staged - on-demand typing: no orphaned cast macros", () => {
+	const orphans = sql => {
+		const defined = [...sql.matchAll(/CREATE OR REPLACE MACRO (fq_cast_\w+)\(/g)].map(m => m[1]);
+		// A defined-and-used macro appears at least twice: once in its CREATE, once at a call site.
+		return defined.filter(name => (sql.match(new RegExp(`${name}\\(`, "g")) || []).length < 2);
+	};
+	// The where-lambda predicate navigates `maxLength` while the repeat body reads `linkId`, so the
+	// lambda's cast structure ({"maxLength":"INTEGER"}) is DISTINCT from the repeat bridge
+	// ({"linkId":"VARCHAR"}) and cannot be masked by pooling: if the lambda fails to thread `_retype`
+	// the maxLength macro is minted but never called, and this guard flags it.
+	const views = {
+		"where() lambda reaches the forced field first": {resource: "Questionnaire", select: [
+			{column: [{name: "v", path: "where(item.maxLength.first() = 6).exists()", type: "boolean"}]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]},
+		"where-clause lambda reaches the forced field first": {resource: "Questionnaire",
+			where: [{path: "where(item.maxLength.first() = 6).exists()"}], select: [
+				{column: [{name: "id", path: "id", type: "id"}]},
+				{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+			]},
+		"columns-only crossing": {resource: "Questionnaire", select: [
+			{column: [{name: "v", path: "item.linkId.first()", type: "string"}]},
+			{repeat: ["item"], column: [{name: "rl", path: "linkId", type: "string"}]}
+		]}
+	};
+	for (const [label, view] of Object.entries(views))
+		test(`no orphaned macro: ${label}`, () => {
+			expect(orphans(buildStaged(view, "/tmp/unused.json", {rootKey: "natural"}))).toEqual([]);
+		});
+});
+
+// Determinism guard (SPEC_sql_template_contract §7). `explore` applies `LIMIT` to the input, and a
+// forked view reads the input once per branch — a non-materialised `LIMIT` (no ORDER BY) could yield
+// different rows per branch and break fork recombination. The shipped `explore` template therefore
+// binds `_fq_input AS MATERIALIZED`; the file templates (no LIMIT) do not. Render the real template
+// files so the guard tracks what ships, not the test harness.
+describe("templates - explore materialises its limited input for forked-view determinism", () => {
+	const tpl = name => fs.readFileSync(path.join(import.meta.dir, "../templates", name), "utf-8");
+	// Two root forEach siblings => a root fork keyed on `_rid`: the input is read once per branch,
+	// which is the premise of the determinism risk a LIMIT would expose.
+	const forked = {resource: "Patient", select: [
+		{column: [{name: "id", path: "getResourceKey()", type: "string"}]},
+		{forEach: "name", column: [{name: "family", path: "family", type: "string"}]},
+		{forEach: "telecom", column: [{name: "phone", path: "value", type: "string"}]}
+	]};
+	const render = name => templateToQuery(forked, fhirSchema, tpl(name), [], false, true, null, null, "natural");
+
+	test("the view forks (a root fork key is emitted)", () => {
+		expect(render("ndjson.sql")).toMatch(/_rid/);
+	});
+	test("explore binds the input AS MATERIALIZED", () => {
+		expect(render("explore.sql")).toMatch(/_fq_input AS MATERIALIZED/);
+	});
+	test("file templates do not materialise the input", () => {
+		expect(render("ndjson.sql")).not.toMatch(/_fq_input AS MATERIALIZED/);
+	});
+});
