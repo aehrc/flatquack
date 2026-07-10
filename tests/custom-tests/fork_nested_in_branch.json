@@ -1,0 +1,76 @@
+{
+  "title": "fork_nested_in_branch",
+  "description": "Finding 1 (PR #34): a fork branch that itself contains a nested fork must carry the branch's iteration ordinal as a recombination key, mirroring the CHAIN path. Without it the nested fork recombines on the parent key alone and cross-joins across the branch's iterations. Two cases: (1) a typed forEach fork branch with a nested forEach fork; (2) the JSON-bridge hole (`:539`) - a forEach over a repeat-forced field, sibling of the repeat, that itself contains a nested fork. Distinct values throughout so the order-independent Set comparison cannot mask a spurious cross-join row.",
+  "fhirVersion": ["5.0.0", "4.0.1", "3.0.2"],
+  "tests": [
+    {
+      "title": "nested fork inside a typed forEach fork branch recombines per iteration",
+      "description": "Root forks on forEach:contact (nested fork forEach:name + forEach:telecom) and a sibling forEach:identifier, over a Patient with two contacts. name/telecom must recombine per contact, not cross-join across contacts.",
+      "resources": [
+        {
+          "resourceType": "Patient", "id": "p1",
+          "identifier": [ { "value": "id1" }, { "value": "id2" } ],
+          "contact": [
+            { "name": { "family": "c1fam" }, "telecom": [ { "value": "c1tel" } ] },
+            { "name": { "family": "c2fam" }, "telecom": [ { "value": "c2tel" } ] }
+          ]
+        }
+      ],
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "forEach": "contact",
+            "select": [
+              { "forEach": "name", "column": [ { "name": "fam", "path": "family", "type": "string" } ] },
+              { "forEach": "telecom", "column": [ { "name": "tel", "path": "value", "type": "string" } ] }
+            ]
+          },
+          { "forEach": "identifier", "column": [ { "name": "idv", "path": "value", "type": "string" } ] }
+        ]
+      },
+      "expect": [
+        { "fam": "c1fam", "tel": "c1tel", "idv": "id1" },
+        { "fam": "c1fam", "tel": "c1tel", "idv": "id2" },
+        { "fam": "c2fam", "tel": "c2tel", "idv": "id1" },
+        { "fam": "c2fam", "tel": "c2tel", "idv": "id2" }
+      ]
+    },
+    {
+      "title": "nested fork inside a JSON-bridge forEach fork branch recombines per iteration",
+      "description": "A repeat over `item` forces `item` to JSON[]; a sibling forEach:item (jsonMode, the `:539` hole) itself forks on forEach:answer + forEach:item. Over two top-level items the nested answer/child-item fork must recombine per top item, not cross-join across items.",
+      "resources": [
+        {
+          "resourceType": "QuestionnaireResponse", "id": "qr1", "status": "completed",
+          "item": [
+            { "linkId": "q1", "answer": [ { "valueString": "a1" } ], "item": [ { "linkId": "c1" } ] },
+            { "linkId": "q2", "answer": [ { "valueString": "a2" } ], "item": [ { "linkId": "c2" } ] }
+          ]
+        }
+      ],
+      "view": {
+        "resource": "QuestionnaireResponse",
+        "select": [
+          { "repeat": ["item"], "column": [ { "name": "rl", "path": "linkId", "type": "string" } ] },
+          {
+            "forEach": "item",
+            "select": [
+              { "forEach": "answer", "column": [ { "name": "av", "path": "valueString", "type": "string" } ] },
+              { "forEach": "item", "column": [ { "name": "cl", "path": "linkId", "type": "string" } ] }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "rl": "q1", "av": "a1", "cl": "c1" },
+        { "rl": "q1", "av": "a2", "cl": "c2" },
+        { "rl": "q2", "av": "a1", "cl": "c1" },
+        { "rl": "q2", "av": "a2", "cl": "c2" },
+        { "rl": "c1", "av": "a1", "cl": "c1" },
+        { "rl": "c1", "av": "a2", "cl": "c2" },
+        { "rl": "c2", "av": "a1", "cl": "c1" },
+        { "rl": "c2", "av": "a2", "cl": "c2" }
+      ]
+    }
+  ]
+}

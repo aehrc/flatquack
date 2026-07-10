@@ -395,7 +395,7 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 	// scope uses — no recursion, just one descent level. `forkOrd`, when set, carries the iteration
 	// ordinal forward as a recombination key (a fork below needs it); otherwise a private ordinal
 	// supplies this iteration's `%rowIndex` only.
-	function emitJsonEach(f, parentRel, carried, keyCols, forkOrd) {
+	function emitJsonEach(f, parentRel, carried, keyCols, forkOrd, keepKey) {
 		// Mint an ordinal as a carried fork key (`forkOrd`) or when this scope binds `%rowIndex`;
 		// otherwise emit none. unnestFrom binds the 0-based `%rowIndex` SQL onto
 		// `f.childElem.rowIndexSql` from it (left null when no ordinal is emitted).
@@ -413,15 +413,18 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		ctes.push(`${bridge} AS (\n  SELECT ${carryCols.length ? carryCols.join(", ") + ", " : ""}${rnProj}${cast} AS ${BRIDGE_VAR}\n  FROM ${from}\n)`);
 		const bodyElem = bridgeElem(f.childElem.seed);
 		bodyElem.rowIndexSql = rnCol;
-		return emitScope(f.node, bodyElem, carried, childKey, bridge, false, null);
+		return emitScope(f.node, bodyElem, carried, childKey, bridge, false, null, keepKey);
 	}
 
 	// emitScope: builds a stage exposing keyCols + carried + this scope's columns, then
 	// chains or forks. `fromSql` is the FROM clause for this stage (null at root: the stage is
 	// `_fq_src`; its select list is exposed as `emitScope.srcSelect` and the assembly wraps it as
 	// `_fq_src AS (SELECT … FROM _fq_input)`). `schemaPrefix` (typed scopes only)
-	// is the resource-rooted field path used to mark forced-JSON repeat seeds. Returns {rel, cols}.
-	function emitScope(scopeNode, elem, carried, keyCols, fromSql, isRoot, schemaPrefix) {
+	// is the resource-rooted field path used to mark forced-JSON repeat seeds. `keepKey` requests that
+	// this scope's result relation expose `keyCols` physically so an enclosing fork can rejoin on it —
+	// set only when this scope is itself a fork branch (a stage already carries its key; a fork drops
+	// it by default, so a non-branch fork stays byte-for-byte unchanged). Returns {rel, cols}.
+	function emitScope(scopeNode, elem, carried, keyCols, fromSql, isRoot, schemaPrefix, keepKey) {
 		const {columns, fanouts} = collectScope(scopeNode);
 
 		const realFanouts = fanouts.filter(f => f.type === "each");
@@ -517,12 +520,12 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 				// A fork-key ordinal (`_ord{depth}`, carried as a key column) doubles as this
 				// iteration's `%rowIndex` source; otherwise a private ordinal supplies it, but only
 				// when this scope actually reads `%rowIndex` — else no ordinal is emitted.
-				if (f.jsonMode) return emitJsonEach(f, relName, carriedAfter, keyCols, f.needsOrd ? `_ord${keyCols.length}` : null);
+				if (f.jsonMode) return emitJsonEach(f, relName, carriedAfter, keyCols, f.needsOrd ? `_ord${keyCols.length}` : null, keepKey);
 				const ordName = f.needsOrd ? `_ord${keyCols.length}` : (f.usesRi ? name("rn") : null);
 				const childKey = f.needsOrd ? [...keyCols, ordName] : keyCols;
 				const from = unnestFrom(relName, f, ordName);
 				const childPrefix = schemaPrefix ? [...schemaPrefix, ...(f.node.forEach || f.node.forEachOrNull).split(".")] : null;
-				return emitScope(f.node, f.childElem, carriedAfter, childKey, from, false, childPrefix);
+				return emitScope(f.node, f.childElem, carriedAfter, childKey, from, false, childPrefix, keepKey);
 			}
 			if (repeatFanouts.length === 1) {
 				// A lone `repeat` is a CHAIN: carry the scope scalars through the rCTE, no key.
@@ -536,14 +539,22 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		const branches = [];
 		realFanouts.forEach(f => {
 			if (f.jsonMode) {
-				const br = emitJsonEach(f, relName, [], keyCols, null);
+				// A JSON-bridge branch that contains a nested fork must carry its iteration ordinal as a
+				// recombination key, or the nested fork recombines on the parent key alone and cross-joins
+				// across this branch's iterations (mirrors the CHAIN path's `forkOrd`).
+				const br = emitJsonEach(f, relName, [], keyCols, f.needsOrd ? `_ord${keyCols.length}` : null, true);
 				branches.push({rel: br.rel, cols: br.cols, kind: f.orNull ? "LEFT" : "INNER"});
 				return;
 			}
-			// A fork branch recombines on the parent `keyCols`; this unnest's ordinal is needed only
-			// to bind the branch's own `%rowIndex` (or a fork/`%rowIndex` repeat deeper in it).
-			const from = unnestFrom(relName, f, (f.needsOrd || f.usesRi) ? name("rn") : null);
-			const br = emitScope(f.node, f.childElem, [], keyCols, from, false, null);
+			// The branch recombines with its siblings on the parent `keyCols`. When it contains a nested
+			// fork (or a `%rowIndex` repeat) its own iteration ordinal must additionally join the branch's
+			// INTERNAL key, exactly as the CHAIN path does; otherwise the ordinal is a private `%rowIndex`
+			// source only. The extra `_ord{N}` is not in the branch's returned `cols`, so its duplicate
+			// name across sibling branches is never referenced by the outer recombination.
+			const ordName = f.needsOrd ? `_ord${keyCols.length}` : (f.usesRi ? name("rn") : null);
+			const childKey = f.needsOrd ? [...keyCols, ordName] : keyCols;
+			const from = unnestFrom(relName, f, ordName);
+			const br = emitScope(f.node, f.childElem, [], childKey, from, false, null, true);
 			branches.push({rel: br.rel, cols: br.cols, kind: f.orNull ? "LEFT" : "INNER"});
 		});
 		repeatFanouts.forEach(f => {
@@ -558,7 +569,12 @@ export function buildStagedQuery(vd, schema, vars, opts = {}) {
 		});
 
 		const forkName = name("f");
+		// When this fork is itself a branch of an enclosing fork, expose `keyCols` in the result so the
+		// outer recombination can `JOIN … USING (keyCols)`; the USING joins below make each key column
+		// unambiguous. `keyCols` stays out of the returned `cols` (body columns only), so a duplicate
+		// name across sibling branches is never referenced. A non-branch fork emits no key columns.
 		const sel = [
+			...(keepKey ? keyCols : []),
 			...carriedAfter.map(c => `${relName}.${c}`),
 			...branches.flatMap(b => b.cols.map(c => `${b.rel}.${c}`))
 		];
