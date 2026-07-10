@@ -65,6 +65,22 @@ export function scratchFile(name) {
 	return path.join(SCRATCH_DIR, name);
 }
 
+// The resource set a case runs against. A per-test `resources` array overrides the group default;
+// then the view applies only to resources of its declared `resource` type — flatquack reads the input
+// with a type-coerced schema, so a foreign resourceType in the same file (e.g. an Organization with a
+// scalar `name` alongside Patients whose `name` is an array) breaks the typed read. Feed only the
+// matching type (the where-filter would drop the rest anyway, so results are unchanged, mirroring the
+// per-resource-type engine model), falling back to the full set if the filter would empty it. Shared
+// by the harness (runFixtureSuite) and the conformance report generator so both select identically.
+export function selectResources(testCase, testGroup) {
+	const allResources = testCase.resources ?? testGroup.resources;
+	const viewType = testCase.view?.resource;
+	const matching = viewType
+		? allResources.filter(r => !r.resourceType || r.resourceType === viewType)
+		: allResources;
+	return matching.length ? matching : allResources;
+}
+
 // Shared JSON-fixture-suite runner. Discovers every `*.json` fixture in `dir`, then registers one
 // test per (case x root-key mode). Used by both the official runner (spec-tests/) and the custom
 // runner (custom-tests/). Honours the official conventions — the file filter, the file-level `skip`
@@ -93,19 +109,9 @@ export function runFixtureSuite({dir, db, rootKeyModes = ["natural", "uuid"]}) {
 			const onlyTests = testGroup.tests.filter( t => t.only );
 			const tests = (onlyTests.length ? onlyTests : testGroup.tests);
 			tests.forEach( (testCase, i) => {
-				// Per-test resources override the fixture default; each distinct resource set gets its
-				// own scratch file so cases never read each other's data.
-				const allResources = testCase.resources ?? testGroup.resources;
-				// A view applies only to resources of its declared `resource` type; flatquack reads the
-				// input with a type-coerced schema, so a foreign resourceType in the same file (e.g. an
-				// Organization with a scalar `name` alongside Patients whose `name` is an array) breaks
-				// the typed read. Feed only the matching type — the where-filter would drop the rest
-				// anyway, so results are unchanged, and it mirrors the per-resource-type engine model.
-				const viewType = testCase.view?.resource;
-				const matching = viewType
-					? allResources.filter(r => !r.resourceType || r.resourceType === viewType)
-					: allResources;
-				const resources = matching.length ? matching : allResources;
+				// Per-test resources override the fixture default and are filtered to the view type; each
+				// distinct resource set gets its own scratch file so cases never read each other's data.
+				const resources = selectResources(testCase, testGroup);
 				const resourceFile = scratchFile(`${fileName}.${i}.temp.json`);
 				rootKeyModes.forEach( rootKey => {
 					test( `${testCase.title} [${rootKey}]`, async () => {

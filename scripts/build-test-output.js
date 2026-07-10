@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-import {buildStaged, scratchFile, openMemoryDb, getColumns, executeQuery} from "../tests/test-util.js";
+import {buildStaged, scratchFile, openMemoryDb, getColumns, executeQuery, selectResources} from "../tests/test-util.js";
 
 const outputPath = path.join(import.meta.dir, "../flatquack_test_output.json");
 const testDirectory = path.join(import.meta.dir, "../tests/spec-tests/");
@@ -52,11 +52,14 @@ const stats = {passed: 0, failed: 0};
 
 for (const file of testFiles) {
 	const testGroup = JSON.parse(fs.readFileSync(testDirectory + file));
-	const resourceFile = scratchFile(file + ".temp.json");
-	await Bun.write(resourceFile, JSON.stringify(testGroup.resources));
 
 	const tests = [];
-	for (const testCase of testGroup.tests) {
+	for (const [i, testCase] of testGroup.tests.entries()) {
+		// Mirror the harness: filter each case's resources to the view type (and honour a per-test
+		// `resources` override) so the report never marks a harness-passing case as failing. Each case
+		// gets its own scratch file since the selected set can differ per case.
+		const resourceFile = scratchFile(`${file}.${i}.temp.json`);
+		await Bun.write(resourceFile, JSON.stringify(selectResources(testCase, testGroup)));
 		const passed = await runCase(testCase, resourceFile);
 		stats[passed ? "passed" : "failed"]++;
 		tests.push({name: testCase.title, result: {passed}});
