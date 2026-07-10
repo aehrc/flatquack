@@ -149,6 +149,24 @@ by `JOIN … USING (_rid, _ord1, …)`.
 > cross-products every item's branch-A rows with every item's branch-B rows within the
 > same resource.
 
+### `--root-key`: how `_rid` is sourced
+
+`_rid` is sourced one of two ways, selected by `--root-key`:
+
+- **`natural`** (default) — `_rid` is the resource key from `getResourceKey()` (the
+  resource's own `id`). This **assumes every resource has a present, per-type-unique
+  `id`**. When that assumption is violated the recombination `JOIN … USING (_rid)`
+  misbehaves: a resource with a **NULL/absent `id`** is dropped (a `USING` join discards
+  NULL-keyed rows), and **duplicate `id`s** within a resource type cross-join their
+  branches. Real FHIR bulk-data exports carry present, unique ids, so this holds in
+  practice.
+- **`uuid`** — `_rid` is a synthesised per-resource `uuid()`, materialised once per
+  resource so every branch observes the same value. It carries **no id assumption** and so
+  is unconditional, at the cost of materialising `_fq_src`.
+
+The two modes therefore produce the same results **only when** the natural-mode assumption
+holds; they are not unconditionally identical.
+
 ---
 
 ## 6. Per-directive templates
